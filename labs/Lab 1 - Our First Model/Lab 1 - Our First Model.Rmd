@@ -1,0 +1,41 @@
+---
+title: "Lab 1 - Our first model!"
+output: html_document
+---
+
+# Lab 1 - Our first model!
+
+Today we are going to build our first Bayesian model. We will use a simple coin toss example to illustrate the basic concepts of Bayesian modeling, including prior, likelihood, and posterior distributions.
+
+More common than tossing a globe, coin tosses are the randomization device of choice in many instances. 'Heads or tails?' we may say. But how fair is that coin anyhow? Let's find out!
+
+Firstly, we need some observed data. Grab a coin and flip it 10 times recording each observation of Heads (0) or Tails (1).
+
+1. Using your real world data, build a Bayesian model that estimates the posterior probability of getting a heads using with a uniform prior. Build a model using both the grid approximation and MCMC Methods (ulam or pymc).
+2. Create plots of the prior, and posterior distributions for both models. How do the results compare?
+
+```{r}
+# import necessary libraries and define functions
+
+```
+
+```{r}
+# grid approximation
+
+```
+
+```{r}
+# ulam model
+
+```
+
+3. Define each component (parameters, prior distribution, likelihood, posterior distribution) of your model and what role they are playing in the estimation of your model.
+
+- Parameters
+- Prior Distribution
+- Likelihood
+- Posterior Distribution
+
+4. If I were looking to make a critical decision based on your coin, with heads (0) being pinot noir and tails (1) being chardonnay, devise a prior that would ensure a 75% posterior probability of having the pinot (i.e. where 75% of the posterior is >0.5). You can do this using either the grid approximation or pymc.
+
+5. Create plots of the prior, and posterior distributions for both models.
