@@ -21,7 +21,7 @@ library(rethinking)
 n_trips <- 30
 
 # the true probability of seeing a frog in this pond
-true_prob <- 0.3
+true_prob <- 0.35
 
 # simulate data from generative model
 sim_data <- rbinom(n_trips, size = 1, prob = true_prob)
@@ -106,7 +106,7 @@ data_list
 ```
 
 ```{r}
-# MCMC method using ulam
+# MCMC method using ulam with uninformed prior
 frog_model <- ulam(
   alist(
     frogs ~ dbinom(trips, p), # data likelihood
@@ -128,7 +128,7 @@ samples <- extract.samples(frog_model, n=10000)
 # plots
 curve(dnorm(x, mean(samples$p), sd(samples$p)), xlab="Probability of seeing frogs", ylab="Density", col="blue")
 curve((dunif(x, 0, 1)), add = TRUE, col="orange")
-abline(v = 0.3, col="red")
+abline(v = 0.35, col="red")
 legend("topright", legend=c("Posterior", "Prior", "True Probability"),
        col=c("blue", "orange", "red"), lty=1)
 ```
@@ -136,11 +136,67 @@ legend("topright", legend=c("Posterior", "Prior", "True Probability"),
 ```{r}
 # posterior summaries
 # above 30%
-sum(samples$p > 0.3) / length(samples$p)
+sum(samples$p > 0.35) / length(samples$p)
 
 # compatibility intervals
 # percentage interval
 PI(samples$p, prob=0.5)
 # highest posterior density interval
-HPDI(samples$p, prob=0.5)
+HPDI(samples$p, prob=0.96)
+```
+In the last model, we assumed ignorance about the probability of seeing frogs at the pond, by using an uninformed uniform prior.
+What if we had some prior knowledge about this pond? For example, we know that this pond is in an area where frogs are very common, and we expect to see them most of the time.
+We can use a Beta distribution to represent this prior knowledge.
+Why a Beta distribution? Because it is defined on the interval [0, 1], which is suitable for probabilities, and it can take on a variety of shapes depending on its parameters.
+
+But what parameters should we use for the Beta distribution? Let's say we expect to see frogs 80% of the time, and we are quite confident about this.
+We can use the parameters alpha = 5 and beta = 8, which gives us a prior mean of 0.4 and a relatively narrow distribution.
+
+We can also plot this prior distribution to see how it looks.
+```{r}
+plot(function(x) dbeta(x, 5, 8), from=0, to=1, col="orange", ylab="Density", xlab="Probability of seeing frogs")
+print(paste("Mean of Beta(5,8):", 5/(5+8)))
+print(paste("Mode of Beta(5,8):", (5-1)/((5-1)+(8-1))))
+```
+And what we can see is that this prior distribution is centered around 0.4, and it has a peak at this value.
+You can play around with the shape values to move the peak to center the distribution around different values.
+Now, let's fit the model again using this informed Beta prior.
+```{r}
+# MCMC method using ulam with informed Beta prior
+frog_model_beta <- ulam(
+  alist(
+    frogs ~ dbinom(trips, p), # data likelihood
+    p ~ dbeta(a = 5, b = 8) # p prior
+  ), data = data_list
+)
+
+```
+
+```{r}
+# model summary
+precis(frog_model)
+```
+
+```{r}
+# posterior samples
+samples <- extract.samples(frog_model, n=10000)
+
+# plots
+curve(dnorm(x, mean(samples$p), sd(samples$p)), xlab="Probability of seeing frogs", ylab="Density", col="blue")
+curve((dunif(x, 0, 1)), add = TRUE, col="orange")
+abline(v = 0.35, col="red")
+legend("topright", legend=c("Posterior", "Prior", "True Probability"),
+       col=c("blue", "orange", "red"), lty=1)
+```
+
+```{r}
+# posterior summaries
+# above 35%
+sum(samples$p > 0.35) / length(samples$p)
+
+# compatibility intervals
+# percentage interval
+PI(samples$p, prob=0.5)
+# highest posterior density interval
+HPDI(samples$p, prob=0.96)
 ```
