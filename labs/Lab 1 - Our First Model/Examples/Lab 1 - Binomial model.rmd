@@ -200,3 +200,11 @@ PI(samples$p, prob=0.5)
 # highest posterior density interval
 HPDI(samples$p, prob=0.96)
 ```
+```{r}
+# plot HDPI
+dens(samples$p, xlab="Probability of seeing frogs", ylab="Density")
+abline(v = 0.35, col="red")
+abline(v = HPDI(samples$p, prob=0.96), col="blue", lty=2)
+legend("topright", legend=c("True Probability", "96% HPDI"),
+       col=c("red", "blue"), lty=c(1,2))
+```
