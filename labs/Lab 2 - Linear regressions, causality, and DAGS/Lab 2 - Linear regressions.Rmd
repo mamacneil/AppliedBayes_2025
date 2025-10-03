@@ -1,0 +1,466 @@
+---
+title: "Lab 2 - Linear regressions, prior and posterior plots"
+author: "Arun Oakley-Cogan"
+date: "2025-10-01"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+# Linear Regressions
+
+Today's tutorial will build upon our simulated frogs scenario and introduce some basic causal models and linear regressions.
+
+## **Bayesian Workflow**
+
+1.  Before fitting a model
+    -   Define what we are estimating (Causal Structure)
+    -   Choose an initial model / Model construction (lego blocks) / Start Simple
+    -   Scale and transform data
+    -   Prior predictive simulation
+    -   Build generative model to simulate data
+2.  Fitting the model
+    -   Set initial values for priors
+    -   Set chain parameters
+    -   Fit the model
+3.  Validating the models
+    -   Use fake data simulation
+4.  Addressing computation problems - not covered today
+5.  Evaluate model fit
+    -   Posterior predictive checks
+    -   Plot out final linear regression
+6.  Modifying the model
+    -   Improve data model
+    -   Incorporate additional data/predictors
+    -   Refine priors distributions
+7.  Compare models - not covered today
+
+```{r}
+library(rethinking)
+library(dagitty)
+```
+
+1.  Before fitting a model
+    -   ***Define what we are estimating (Causal Structure)***
+
+Last week, we went to a pond 30 times and recorded the presence/absence of frogs.
+This time, let's imagine when we go to the pond and see frogs, we capture them, record their length, weight and sex then toss them back in.
+
+While recording this data we notice that smaller frogs tend to weigh less than larger frogs, and we want to describe this relationship between weight and length.
+
+**Q. How does length influence weight?**
+
+```{r}
+# causal model of our question.
+dag_1 <- dagitty( "dag{ Length -> Weight }" )
+drawdag(dag_1)
+
+# we can specify where we want our nodes to sit
+coordinates(dag_1) <- list(x=c(Length=0, Weight=1), y=c(Length=0, Weight=0))
+drawdag(dag_1)
+```
+
+It is important that we state our causal assumptions.
+Why is there an arrow going between Length and Weight?
+Here it is quite simple, as a frog gets longer it is reasonable to assume it also gets heavier.
+
+What we are also implying in this causal model that:
+
+**Weight is a function of Length**.
+
+$$
+Weight_i = \beta Length_i
+$$
+
+1.  Before fitting a model
+    -   Define what we are estimating (Causal Structure)
+    -   ***Choose an initial model / Model construction (lego blocks) / Start Simple***
+
+In this step we want to start thinking about how we can build a statistical model to estimate the relationship between length and weight.
+So the questions I start asking myself are.
+- What distributions I want to use to represent my data likelihood and my priors?
+- What kind of functional form do I want to use to represent the relationship between length and weight?
+- It NEVER hurts to start simple.
+So we start with a linear model and normal distribution.
+
+$$
+\large{
+\begin{align*}
+Weight_i \sim Normal(mu_i, sigma)\\
+mu_i = alpha + \beta Length_i\\
+alpha \sim Normal(0,1)\\
+\beta \sim Normal(0,1)\\
+sigma \sim Exp(1)
+\end{align*}}
+$$
+
+1.  Before fitting a model
+    -   Define what we are estimating (Causal Structure)
+    -   Choose an initial model / Model construction (lego blocks) / Start Simple
+    -   ***Scale and transform data***
+    -   ***Prior predictive simulation***
+    -   ***Build generative model to simulate data***
+
+These next three steps are not always done in this order, but I find it useful to simulate data first, then standardize it, then do prior predictive simulation.
+Once you are more familiar with building models you can usually jump straight to the last step, building a generative model, use that model to simulate data, and then do some prior predictive checks.
+
+#### Simulate some data
+
+```{r}
+# number of frogs
+n_frog <- 75
+
+# linear model of lengths and weights.
+simulate_weight <- function(lengths, sd, b) {
+  residual_variation <- rnorm(length(lengths), 0, sd) # random noise
+  weights <- b*lengths + residual_variation
+  return(weights)
+}
+
+# generate our frogs
+lengths <- runif(n_frog, min=65, max=145)
+weights <- simulate_weight(lengths, sd=5, b=0.5)
+
+# plot our data
+plot(weights ~ lengths, col="deepskyblue4", lwd=2, xlab="Frog length (mm)", ylab="Frog weight (g)")
+```
+
+#### Standardize data
+
+```{r}
+# package data and standardize
+sim_data <- list(
+  weight = standardize(weights),
+  length = standardize(lengths)
+)
+precis(sim_data);
+```
+
+```{r}
+plot(weight ~ length, data=sim_data, col="deepskyblue4", lwd=2, xlab="Frog length std (mm)", ylab="Frog weight std (g)")
+```
+
+#### Prior predictive simulation
+
+```{r}
+# simulate from our priors
+n_samps <- 100
+alpha_prior <- rnorm(n_samps, mean=0, sd=1)
+beta_prior <- rnorm(n_samps, mean=0, sd=1)
+
+# plot 
+plot(weight ~ length, data=sim_data, col="deepskyblue4", lwd=2, xlab="Frog length std (mm)", ylab="Frog weight std (g)", ylim=c(-5,5))
+for (i in 1:n_samps) curve(alpha_prior[i] + beta_prior[i]*x, from=-2, to=2, add=T, col=col.alpha("black",0.2))
+```
+
+These priors are incredible uninformative, they predict both strongly positive and negative relationships, with values that are \> -2,2 std deviations from the mean.
+For now lets tighten these priors up by modifying the standard deviations.
+
+```{r}
+# simulate from our priors
+n_samps <- 100
+alpha_prior <- rnorm(n_samps, mean=0, sd=0.5)
+beta_prior <- rnorm(n_samps, mean=0, sd=0.5)
+
+# plot
+plot(weight ~ length, data=sim_data, col="deepskyblue4", lwd=2, xlab="Frog length std (mm)", ylab="Frog weight std (g)", ylim=c(-5,5))
+for (i in 1:n_samps) curve(alpha_prior[i] + beta_prior[i]*x, from=-2, to=2, add=T, col=col.alpha("black",0.2))
+```
+
+2.  ***Fitting the model**
+    -   Set initial values for priors
+    -   Set chain parameters
+    -   Fit the model
+
+```{r}
+length_model <- ulam(
+  alist(
+    weight ~ dnorm(mu, sigma),
+    mu <- alpha + beta*length,
+    alpha ~ dnorm(0,0.5),
+    beta ~ dnorm(0,0.5),
+    sigma ~ dexp(1)
+  ), data = sim_data, chains = 4
+)
+
+precis(length_model)
+```
+
+3.  Validating the models
+    -   ***Use fake data simulation***
+
+Did we get back what we put in?
+
+```{r}
+# plot posterior distributions of our parameters
+# forest plot
+plot( coeftab(length_model), par=c("alpha","beta","sigma") )
+dens(extract.samples(length_model)$beta, xlim=c(-1,1), lwd=2, xlab="bL", main="Posterior distribution of beta")
+```
+
+```{r}
+# function back transform our posterior estimates
+scale_weight <- attr(sim_data$weight, "scaled:scale")
+center_weight <- attr(sim_data$weight, "scaled:center")
+scale_length <- attr(sim_data$length, "scaled:scale")
+center_length <- attr(sim_data$length, "scaled:center")
+
+posterior <- extract.samples(length_model)
+posterior$beta_original <- posterior$beta * (scale_weight / scale_length)
+posterior$alpha_original <- posterior$alpha * scale_weight + center_weight - 
+                       posterior$beta_original * center_length
+
+precis(posterior, depth=2)
+dens(posterior$beta_original, lwd=2, xlab="bL", main="Posterior distribution of beta (transformed)")
+
+```
+
+5.  Evaluate model fit
+    -   ***Posterior predictive checks***
+    -   ***Plot out final linear regression***
+
+Here we check the predictions that are implied by our model against our data.
+We do this to see if the model correctly approximated the posterior distribution and to gain insights into how the model fails.
+Most often a model makes good predictions in some observations but not others.
+We can then go and inspect those individual observations to get an idea of how to improve our model.
+### Posterior predictive checks
+
+```{r}
+# compute the mean predicted by the model over the range of our data
+mu <- link(length_model)
+mu_mean <- apply(mu, 2, mean)
+mu_PI <- apply(mu, 2, PI, prob=.96)
+
+plot( mu_mean ~ sim_data$weight, col="deepskyblue4", lwd=2, xlab="Observed Weights", ylab="Predicted Weights", ylim=c(-2,2), xlim=c(-2,2))
+abline( a=0 , b=1 , lty=2 ) 
+for ( i in 1:75 ) lines( rep(sim_data$weight[i],2) , mu_PI[,i] , col="deepskyblue4" )
+```
+
+### Plot out final linear regression,
+
+```{r}
+# extract samples
+post <- extract.samples(length_model)
+
+# generate a sequence of lengths to compute the posterior mean
+lengths_seq <- seq(-2, 2, by=1)
+
+# compute the mean predicted by the model over our range of lengths
+mu <- link(length_model, data=list(length=lengths_seq))
+mu_mean <- apply(mu, 2, mean)
+mu_PI <- apply(mu, 2, PI, prob=.89)
+
+plot(weight ~ length, data=sim_data, col="deepskyblue4", lwd=2, xlab="Frog length std (mm)", ylab="Frog weight std (g)")
+lines(lengths_seq, mu_mean, col="black", lwd=2)
+shade(mu_PI, lengths_seq)
+
+```
+
+6.  Modifying the model
+    -   ***Improve data model***
+    -   ***Incorporate additional data/predictors***
+    -   ***Refine priors distributions**
+
+Priors should express scientific knowledge, but do so with some flexibility.
+We know that generally weight increases with length.
+So predicting negative relationships is not very useful.
+So lets modify our prior on bL to be a log normal distribution.
+
+```{r}
+alpha_prior <- rnorm(n_samps, mean=0, sd=0.5)
+beta_prior <- rlnorm(n_samps, mean=0, sd=0.2) # change
+
+# plot
+plot(weight ~ length, data=sim_data, col="deepskyblue4", lwd=2, xlab="Frog length std (mm)", ylab="Frog weight std (g)", ylim=c(-5,5))
+for (i in 1:n_samps) curve(alpha_prior[i] + beta_prior[i]*x, from=-2, to=2, add=T, col=col.alpha("black",0.2))
+```
+
+```{r}
+length_model_2 <- ulam(
+  alist(
+    weight ~ dnorm(mu, sigma),
+    mu <- alpha + beta*length,
+    alpha ~ dnorm(0,0.5),
+    beta ~ dlnorm(0,0.2),
+    sigma ~ dexp(1)
+  ), data = sim_data, chains = 4
+)
+
+scale_weight <- attr(sim_data$weight, "scaled:scale")
+center_weight <- attr(sim_data$weight, "scaled:center")
+scale_length <- attr(sim_data$length, "scaled:scale")
+center_length <- attr(sim_data$length, "scaled:center")
+
+posterior_2 <- extract.samples(length_model_2)
+posterior_2$beta_original <- posterior_2$beta * (scale_weight / scale_length)
+posterior_2$alpha_original <- posterior_2$alpha * scale_weight + center_weight - 
+                       posterior_2$beta_original * center_length
+
+precis(posterior_2, depth=2)
+dens(posterior_2$beta_original, lwd=2, xlab="beta", main="Posterior distribution of beta (transformed)")
+```
+
+## Multiple Linear Regression: Adding another covariate and spurious correlations
+
+Let us add another covariate into our casual model.
+We are going to make this pretty far-fetched to emphasize the points made in lecture of spurious correlation.
+Let's add colour into the mix!
+
+```{r}
+# causual model
+dag_2 <- dagitty( "dag{ Length -> Weight Length -> Colour Colour -> Weight}" )
+coordinates(dag_2) <- list(x=c(Length=0, Weight=1, Unobserved=2, Colour=2), y=c(Length=2, Weight=1, Unobserved=0, Colour=2))
+drawdag(dag_2)
+```
+
+My causal assumptions stated in this model are
+
+Length -\> Weight: As a frog gets longer it gets heavier.
+
+Length -\> Colour: As a frog gets longer its colour changes.
+
+Colour -\> Weight: As a frog changes colour it also causes changes to weight ???
+
+The functional implications of this casual model are:
+
+$$
+\large{
+\begin{align*}
+& Weight_i = \beta_L Length_i + \beta_C Colour_i \\
+& Colour_i = \beta_L Colour_i\\
+\end{align*}}
+$$
+
+```{r}
+# We have our lengths and weights, so lets simulate the effect of length on colours
+simulate_colour <- function(lengths, sd, b) {
+  residual_variation <- rnorm(length(lengths), 0, sd) # random noise
+  colour <- b*lengths + residual_variation
+  return(colour)
+}
+
+# generate our frogs
+colours <- simulate_colour(sim_data$length, sd=0.5, b=0.6)
+
+# add it to our dataset
+sim_data$colour <- colours
+
+# our new relationship
+plot(sim_data$colour ~ sim_data$length, col="deepskyblue4", lwd=2, xlab="Frog length (mm)", ylab="Frog colour groups")
+
+# our original 
+plot(sim_data$weight ~ sim_data$length, col="deepskyblue4", lwd=2, xlab="Frog length (mm)", ylab="Frog weight (g)")
+```
+
+```{r}
+# here is the kicker, the relationship between weight and colour - even though we have never simulated any data between the two
+plot(sim_data$weight ~ sim_data$colour, col="deepskyblue4", lwd=2, xlab="Frog colours groups", ylab="Frog weight (g)")
+```
+
+```{r}
+colour_model <- ulam(
+  alist(
+    weight ~ dnorm(mu, sigma),
+    mu <- alpha + bC*colour,
+    alpha ~ dnorm(0, 1),
+    bC ~ dlnorm(0,0.5),
+    sigma ~ dexp(1)
+  ), data = sim_data, chains = 4
+)
+
+# posterior prediction plot 
+# compute the mean predicted by the model over the range of our data
+mu <- link(colour_model)
+mu_mean <- apply(mu, 2, mean)
+mu_PI <- apply(mu, 2, PI, prob=.89)
+
+plot( mu_mean ~ sim_data$weight, col="deepskyblue4", lwd=2, xlab="Observed Weights", ylab="Predicted Weights" ) 
+abline( a=0 , b=1 , lty=2 ) 
+for ( i in 1:75 ) lines( rep(sim_data$weight[i],2) , mu_PI[,i] , col="deepskyblue4" )
+
+# plot our regression
+# extract samples
+post <- extract.samples(colour_model)
+
+# generate a sequence of colours to compute the posterior mean
+colours_seq <- seq(-3, 3, by=1)
+
+# compute the mean predicted by the model over our range of lengths
+mu <- link(colour_model, data=list(colour=colours_seq))
+mu_mean <- apply(mu, 2, mean)
+mu_PI <- apply(mu, 2, PI, prob=.89)
+
+plot(weight ~ colour, data=sim_data, col="deepskyblue4", lwd=2, xlab="Frog colours", ylab="Frog weight std (g)")
+lines(colours_seq, mu_mean, col="black", lwd=2)
+shade(mu_PI, colours_seq)
+
+
+```
+
+### Build our statistical model
+
+$$
+\large{
+\begin{align*}
+Weight_i \sim Normal(mu_i, sigma)\\
+mu_i = alpha + \beta_L Length_i + \beta_C Colour_i\\
+alpha \sim Normal(0,0.5)\\
+\beta_L \sim Normal(0,0.2)\\
+\beta_C \sim Normal(0,0.2)\\
+sigma \sim Exp(1)
+\end{align*}}
+$$ \#### Prior predictive simulation
+
+```{r}
+# simulate from our priors
+n_samps <- 100
+alpha_prior <- rnorm(n_samps, mean=0, sd=1)
+beta_C_prior <- rlnorm(n_samps, mean=0, sd=0.8)
+beta_L_prior <- rlnorm(n_samps, mean=0, sd=0.8)
+# plot 
+plot(weight ~ colour, data=sim_data, col="deepskyblue4", lwd=2, xlab="Frog colours", ylab="Frog weight std (g)")
+for (i in 1:n_samps) curve(alpha_prior[i] + beta_C_prior[i]*x + beta_L_prior[i]*x, from=-3, to=3, add=T, col=col.alpha("black",0.2))
+```
+
+Run our multiple regression
+
+```{r}
+# multiple regression
+length_colour_model <- ulam(
+  alist(
+    weight ~ dnorm(mu, sigma),
+    mu <- alpha + bL*length + bC*colour,
+    alpha ~ dnorm(0,1),
+    bL ~ dnorm(0,.8),
+    bC ~ dnorm(0,.8),
+    sigma ~ dexp(1)
+  ), data=sim_data, chains=4
+)
+```
+
+Using coeftab we can plot what each parameter estimate is foreach model
+
+```{r}
+plot( coeftab(colour_model, length_model, length_colour_model), par=c("alpha","bL","bC", "sigma") )
+```
+
+```{r}
+# posterior prediction plot 
+# compute the mean predicted by the model over the range of our data
+mu <- link(length_colour_model)
+mu_mean <- apply(mu, 2, mean)
+mu_PI <- apply(mu, 2, PI, prob=.89)
+
+plot( mu_mean ~ sim_data$weight, col="deepskyblue4", lwd=2, xlab="Observed Weights", ylab="Predicted Weights" ) 
+abline( a=0 , b=1 , lty=2 ) 
+for ( i in 1:75 ) lines( rep(sim_data$weight[i],2) , mu_PI[,i] , col="deepskyblue4" )
+
+```
+
+```{r}
+# real causal model
+dag_1 <- dagitty( "dag{ Length -> Weight Length -> Colour }" )
+coordinates(dag_1) <- list(x=c(Length=0, Weight=1, Unobserved=2, Colour=2), y=c(Length=2, Weight=1, Unobserved=0, Colour=2))
+drawdag(dag_1)
+```
