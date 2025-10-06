@@ -8,7 +8,6 @@ data(WaffleDivorce)
 waffle_data <- WaffleDivorce
 ```
 
-
 1. (12 points) Develop two statistical models, one to predict divorce rates using median age at marriage as a predictor, and another using marriage rates as a predictor. Using ***unstandardized*** data.
    - For each model, provide:
       - (2 points) A DAG explaining the causal relationship between the two variables. 
