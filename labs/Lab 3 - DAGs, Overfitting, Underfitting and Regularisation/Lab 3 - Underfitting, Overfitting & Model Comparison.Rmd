@@ -1,0 +1,431 @@
+---
+title: "Lab 3 - Underfitting, Overfitting, Predictive Accuracy and Model Comparison"
+author: "Arun Oakley-Cogan"
+date: "2025-10-06"
+output: html_document
+---
+
+```{r}
+library(rethinking)
+rm(list = ls())
+# functions
+sim_weight <- function(lengths, sd, beta_w) {
+  random_variation <- rnorm(length(lengths), 0, sd = 1) # random noise
+  weights <- beta_w*lengths + random_variation
+  return(weights)
+}
+sim_colour <- function(lengths, sd, beta_c) {
+  random_variation <- rnorm(length(lengths), 0, sd = 1) # random noise
+  colour <- beta_c*lengths + random_variation
+  return(colour)
+}
+sim_predation <- function(colours, weights, sd, beta_c, beta_w) {
+  random_variation <- rnorm(length(colours), 0, sd = 1) # random noise
+  predation <- beta_c*colours + beta_w*weights + random_variation
+  return(predation)
+}
+sim_reproduction <- function(colours, weights, sd, beta_c, beta_w) {
+  random_variation <- rnorm(length(colours), 0, sd = 1) # random noise
+  reproduction <- beta_c*colours + beta_w*weights + random_variation
+  return(reproduction)
+}
+```
+
+```{r}
+set.seed(123) 
+# create frog data set
+# number of frogs
+n_frog <- 75
+# generate some lengths
+lengths <- rnorm(n_frog, 0, 1)
+# Length -> Weight
+weights <- sim_weight(lengths, 1, 1)
+# Length -> Colour
+colours <- sim_colour(lengths, 1, -1)
+# colour -> predation, weight -> predation
+predation <- sim_predation(colours, weights, sd=1, beta_c=1.5, beta_w=1)
+# colour -> reproduction, weight->reproduction
+reproduction <- sim_reproduction(colours, weights, sd=1, beta_c=-1.5, beta_w=1)
+
+frog_data <- list(
+  weights=standardize(weights),
+  lengths=standardize(lengths),
+  colours=standardize(colours),
+  reproduction=standardize(reproduction),
+  predation=standardize(predation)
+)
+
+```
+
+```{r}
+frog_dag <- dagitty("dag{ Length -> Weight Length -> Colour Colour-> Reproduction Colour->Predation Weight->Predation Weight->Reproduction}")
+coordinates(frog_dag) <- list(x=c(Length=0, Weight=2, Colour=0, Reproduction=2, Predation=1), y=c(Length=0, Weight=0, Colour=2, Reproduction=2, Predation=1))
+drawdag(frog_dag)
+```
+
+So far we have looked at the way statistical models can:
+
+-   Describe the points in our data by fitting a model (linear regression)
+
+-   Describe what function explains these points (causal inference)
+
+We can also use statistical models to aid in *prediction*. What is going to be the next observation from the same process.
+
+## What is LPPD?
+
+**LPPD** stands for **Log Pointwise Predictive Density**. It's a measure of how well a model predicts data, and it's fundamental to modern Bayesian model comparison.
+
+When we fit a Bayesian model, we get a **posterior distribution** of parameters.
+
+LPPD can answer, "How well does this posterior distribution predict each observation in our data?"
+
+For each data point $y_i$, LPPD calculates:
+
+$$\text{lppd} = \sum_{i=1}^{N} \log \left( \frac{1}{S} \sum_{s=1}^{S} p(y_i | \theta_s) \right)$$
+
+Where: - $N$ is the number of observations - $S$ is the number of posterior samples - $\theta_s$ is the $s^{th}$ sample from the posterior - $p(y_i | \theta_s)$ is the likelihood of observation $i$ given parameters $\theta_s$
+
+For each observation, we average the likelihood across all posterior samples, take the log, and sum across all observations.
+
+### Why do I care?
+
+1.  **Prediction focus**: LPPD measures predictive accuracy, not just fit
+2.  **Accounts for uncertainty**: Uses the full posterior distribution, not just point estimates
+3.  **Foundation for model comparison**: LPPD is the basis for WAIC and LOO-CV
+4.  **Detects overfitting**: Models that overfit will have high in-sample LPPD but poor out-of-sample LPPD
+
+Let's use our simulated data to show it in action
+
+```{r}
+one_par <- ulam(
+  alist(
+    predation ~ dnorm(mu, sigma),
+    mu <- alpha,
+    alpha ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), data = list(predation = frog_data$predation), chains = 4, log_lik = TRUE
+)
+two_par <- ulam(
+  alist(
+    predation ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours,
+    alpha ~ dnorm(0, 1),
+    beta_c ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), data = list(predation = frog_data$predation, colours=frog_data$colours), chains = 4, log_lik = TRUE
+)
+three_par <- ulam(
+  alist(
+    predation ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours + beta_l*lengths,
+    alpha ~ dnorm(0, 1),
+    beta_c ~ dnorm(0, 1),
+    beta_l ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), data = list(predation = frog_data$predation, colours=frog_data$colours, lengths=frog_data$lengths), chains = 4, log_lik = TRUE
+)
+four_par <- ulam(
+  alist(
+    predation ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours + beta_l*lengths + beta_w*weights,
+    alpha ~ dnorm(0, 1),
+    beta_c ~ dnorm(0, 1),
+    beta_l ~ dnorm(0, 1),
+    beta_w ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data = list(predation = frog_data$predation, colours=frog_data$colours, lengths=frog_data$lengths, weights=frog_data$weights), 
+  chains = 4, 
+  log_lik = TRUE
+)
+five_par <- ulam(
+  alist(
+    predation ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours + beta_l*lengths + beta_w*weights + beta_r*reproduction,
+    alpha ~ dnorm(0, 1),
+    beta_c ~ dnorm(0, 1),
+    beta_l ~ dnorm(0, 1),
+    beta_w ~ dnorm(0, 1),
+    beta_r ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data = frog_data, 
+  chains = 4, 
+  log_lik = TRUE
+)
+frog_data$reproduction2 <- frog_data$reproduction^2
+poly_par <- ulam(
+  alist(
+    predation ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours + beta_l*lengths + beta_w*weights + beta_r*reproduction + beta_w2*reproduction2,
+    alpha ~ dnorm(0, 1),
+    beta_c ~ dnorm(0, 1),
+    beta_l ~ dnorm(0, 1),
+    beta_w ~ dnorm(0, 1),
+    beta_w2 ~ dnorm(0, 1),
+    beta_r ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), 
+  data = frog_data, 
+  chains = 4, 
+  log_lik = TRUE
+)
+```
+
+```{r}
+# Extract LPPD for each model
+lppd_p1 <- sum(lppd(one_par))
+lppd_p2 <- sum(lppd(two_par))
+lppd_p3 <- sum(lppd(three_par))
+lppd_p4 <- sum(lppd(four_par))
+lppd_p5 <- sum(lppd(five_par))
+lppd_p6 <- sum(lppd(poly_par))
+
+# Create comparison table
+lppd_comparison <- data.frame(
+  Model = c("M1: Intercept Only", 
+            "M2: Colour Only", 
+            "M3: Colour + Length", 
+            "M4: Colour + Length + Weight",
+            "M5: Colour + Length + Weight + Reproduction",
+            "M6: Polynomial"
+            ),
+  LPPD = c(lppd_p1, lppd_p2, lppd_p3, lppd_p4, lppd_p5, lppd_p6),
+  Parameters = c(1, 2, 3, 4, 5, 6)
+)
+
+print(lppd_comparison)
+```
+
+**Higher LPPD is better** - it means the model assigns higher probability density to the observed data.
+
+Looking at our results:
+
+1.  **M1 (Intercept Only)**: Poorest LPPD - ignores all predictors
+2.  **M2 (Colour Only)**:
+3.  **M3 (Colour + Length)**:
+4.  **M4 (Colour + Length + Weight)**:
+5.  **M5 (Colour + Length + Weight + Reproduction)**:
+6.  **M6 (Polynomial)**: Highest LPPD YAY
+
+The posterior distributions of our five parameter model do the best job at predicting our data.
+
+## From LPPD to Model Comparison Metrics
+
+LPPD is the foundation for:
+
+### 1. WAIC (Widely Applicable Information Criterion)
+
+$$\text{WAIC} = -2(\text{lppd} - p_{WAIC})$$
+
+Where $p_{WAIC}$ is the effective number of parameters (penalty for overfitting).
+
+### 2. LOO-CV (Leave-One-Out Cross-Validation)
+
+Estimates out-of-sample LPPD by leaving out each observation and predicting it.
+
+```{r}
+# Compare models using WAIC
+compare(one_par, two_par, three_par, four_par, five_par, poly_par)
+compare(one_par, two_par, three_par, four_par, five_par, poly_par, func = "PSIS")
+```
+
+## Model Comparison vs Model Selection
+
+One thing we can do with all of these tools is to perform *model selection*, which means choosing the model with the lowest PSIS/WAIC value. An issue with this idea is maximizing predictive accuracy is not the same is not the same as making inference based on causation. In fact, models that counfound causal inference can make better predictions.
+
+Instead, we prefer a concept of *model comparison*, which uses multiple models to understand how different variables influence predictions and when used with a causal model and independencies help us infer causal relationships.
+
+Let's go through a simulated example.
+
+```{r}
+collider_dag <- dagitty("dag{ A-> C B->C}")
+coordinates(collider_dag) <- list(x=c(B=2, A=0, C=2), y=c(B=0, A=2, C=2))
+drawdag(collider_dag)
+```
+
+```{r}
+# simulate our data
+A <- rnorm(100, 0, 1)
+B <- rnorm(100, 0, 1)
+
+# effect sizes
+bA = -1.5
+bB = 1.5
+C <- rnorm(100, bA*A + bB*B, 1)
+
+sim_data <- list(
+  A = standardize(A),
+  B = standardize(B),
+  C = standardize(C)
+)
+```
+
+We want to see the effect of A on B
+
+```{r}
+A_model <- ulam(
+  alist(
+    B ~ dnorm(mu, sigma),
+    mu <- alpha + bA*A,
+    alpha ~ dnorm(0,1),
+    bA ~ dnorm(0,1),
+    sigma ~ dexp(1)
+  ), data = sim_data, chains = 4, log_lik = T
+)
+
+AC_model <- ulam(
+  alist(
+    B ~ dnorm(mu, sigma),
+    mu <- alpha + bC*C + bA*A,
+    alpha ~ dnorm(0,1),
+    bC ~ dnorm(0,1),
+    bA ~ dnorm(0,1),
+    sigma ~ dexp(1)
+  ), data = sim_data, chains = 4, log_lik = T
+)
+```
+
+Lets take a look at the effects of each model, we are expecting that A has no effect on B
+
+```{r}
+plot(coeftab(A_model, AC_model))
+```
+
+Ok, so in our model with just A, we get what we expect, no effect of A on B, but when we introduce C (a collider), this drastically changes our estimate of the effect of A on B, because we have opened a back door path by including the collider.
+
+What model do we use here? A_model or AC_model?
+
+Now, lets see how they do at making predictions.
+
+```{r}
+compare(A_model, AC_model, func=PSIS)
+```
+
+The AC_model is the better model at predicting. Which model should we use now? Why is it so much better?
+
+If we just went by the methods of model selection, we would pick AC_model, as it is better at predicting out-of-sample B's Why? because conditioning on the collider induces a statistical association, so adds to predictive accuracy. While the AC model is better at predicting it fails causally.
+
+Lastly, lets go through these tables -
+
+-   WAIC - SE: standard error of WAIC
+-   dWAIC: difference between each models WAIC and the best WAIC in the set
+-   dSE: standard error fro the best model
+-   pWAIC: penalty term - these numbers are close to the number of parameters in the posterior
+
+#### Leave-one-out cross-validation (LOOCV) VISUALISATION
+
+LOOCV is a process in which we can estimate how well our model makes predictions out of sample
+
+-   Drop one point out of the data set
+-   Fit a linear regression to the remaining points
+-   Try and predict the dropped point.
+-   Calculate a prediction error
+-   Repeat for all remaining points
+
+```{r}
+length_model <- ulam(
+  alist(
+    weights ~ dnorm(mu, sigma),
+    mu <- alpha + beta_l*lengths,
+    alpha ~ dnorm(0,0.5),
+    beta_l ~ dlnorm(0,0.2),
+    sigma ~ dexp(1)
+  ), data = frog_data, chains = 4, log_lik = T
+)
+# generate a sequence of lengths to compute the posterior mean
+lengths_seq <- seq(-3, 3, by=1)
+
+# compute the mean predicted by the model over our range of lengths
+mu <- link(length_model, data=list(lengths=lengths_seq))
+mu_mean <- apply(mu, 2, mean)
+mu_PI <- apply(mu, 2, PI, prob=.96)
+
+plot(weights ~ lengths, data=frog_data, col="deepskyblue4", lwd=2, xlab="Frog length std (mm)", ylab="Frog weight std (g)")
+lines(lengths_seq, mu_mean, col="black", lwd=2)
+shade(mu_PI, lengths_seq)
+```
+
+```{r}
+plot(frog_data$lengths, frog_data$weights, col=ifelse(frog_data$lengths < -2.4,"orange","deepskyblue4"), lwd=2, xlab="Frog length (mm)", ylab="Frog weight (g)")
+```
+
+Dropping orange point from the data set and fitting a new regression
+
+```{r}
+# copy original data
+frog_data_loo <- frog_data
+# find index of point where its length is less than -2.4
+loo_point <- which(frog_data$lengths < -2.4)
+# remove that point from lengths
+frog_data_loo$lengths <- frog_data$lengths[-c(72)]
+# remove that point from weights
+frog_data_loo$weights <- frog_data$weights[-c(72)]
+
+# run model
+length_loo_model <- ulam(
+  alist(
+    weights ~ dnorm(mu, sigma),
+    mu <- alpha + beta_l*lengths,
+    alpha ~ dnorm(0,0.5),
+    beta_l ~ dlnorm(0,0.2),
+    sigma ~ dexp(1)
+  ), data = frog_data_loo, chains = 4
+)
+```
+
+```{r}
+# generate a sequence of lengths to compute the posterior mean
+lengths_seq <- seq(-3, 3, by=1)
+
+# compute the mean predicted by the model over our range of lengths
+mu <- link(length_loo_model, data=list(lengths=lengths_seq))
+mu_mean_loo <- apply(mu, 2, mean)
+mu_PI_loo <- apply(mu, 2, PI, prob=.96)
+
+# comparison of old and new regression lines
+plot(weights ~ lengths, data=frog_data, col=ifelse(frog_data$lengths < -2.4,"orange","deepskyblue4"), lwd=2, xlab="Frog length std (mm)", ylab="Frog weight std (g)")
+lines(lengths_seq, mu_mean_loo, col="orange", lwd=2)
+shade(mu_PI_loo, lengths_seq)
+lines(lengths_seq, mu_mean, col="deepskyblue4", lwd=2)
+shade(mu_PI, lengths_seq)
+legend("topleft", legend = c('Full Data', 'Loo Data'), col=c('deepskyblue4', 'orange'), lty=1)
+```
+
+Predict where dropped point should be, and calculate the error
+
+```{r}
+plot(weights ~ lengths, data=frog_data, col=ifelse(frog_data$lengths < -2.4,"orange","deepskyblue4"), lwd=2, xlab="Frog length std (mm)", ylab="Frog weight std (g)")
+lines(lengths_seq, mu_mean_loo, col="orange", lwd=2)
+shade(mu_PI_loo, lengths_seq)
+lines(lengths_seq, mu_mean, col="deepskyblue4", lwd=2)
+shade(mu_PI, lengths_seq)
+points(frog_data$lengths[c(72)], -1.75, pch=19, col="orange" )
+segments(x0=frog_data$lengths[c(72)],y0=frog_data$weights[c(72)], x1=frog_data$lengths[c(72)], y1=-1.75, lty = 2, col="orange" )
+legend("topleft", legend = c('Full Data', 'Loo Data'), col=c('deepskyblue4', 'orange'), lty=1)
+```
+
+Doing this for each point, dropping the data point, refitting a line, calculating the prediction error and summing up gives us a measure of its out-of-sample predictive accuracy.
+
+While this is conceptually easier to grasp, it can be a intensive computation. Instead of doing all of these computations, there are two ways the out-of-sample predictive accuracy can be measured.
+
+-   Pareto-smoothed importance sampling cross validation (PSIS)
+
+-   Widely applicably information criterion (WAIC)
+
+```{r}
+# PSIS
+PSIS(length_model)
+WAIC(length_model)
+```
+
+You can see that both give us approximately the same answers.
+
+To go through these outputs:
+
+-   WAIC/PSIS is the score for out-of-sample deviance (lower the better)
+-   lppd: log-pointwise-posterior-density: the Bayesian version of log probability
+-   penalty: effective number of parameters penalty
+-   std_err: standard error of WAIC/PSIS score
+
+**Cross validation measures predictive accuracy but doesn't do anything about it.**

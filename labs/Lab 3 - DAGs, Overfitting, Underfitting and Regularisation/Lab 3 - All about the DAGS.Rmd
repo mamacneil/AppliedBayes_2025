@@ -1,0 +1,271 @@
+---
+title: "Lab 3 - All about the DAGS"
+author: "Arun Oakley-Cogan"
+date: "2025-10-06"
+output: html_document
+---
+
+```{r}
+library(rethinking)
+library(dagitty)
+
+# functions
+sim_weight <- function(lengths, sd, beta_w) {
+  random_variation <- rnorm(length(lengths), 0, sd = 1) # random noise
+  weights <- beta_w*lengths + random_variation
+  return(weights)
+}
+sim_colour <- function(lengths, sd, beta_c) {
+  random_variation <- rnorm(length(lengths), 0, sd = 1) # random noise
+  colour <- beta_c*lengths + random_variation
+  return(colour)
+}
+sim_predation <- function(colours, weights, sd, beta_c, beta_w) {
+  random_variation <- rnorm(length(colours), 0, sd = 1) # random noise
+  predation <- beta_c*colours + beta_w*weights + random_variation
+  return(predation)
+}
+sim_reproduction <- function(colours, weights, sd, beta_c, beta_w) {
+  random_variation <- rnorm(length(colours), 0, sd = 1) # random noise
+  reproduction <- beta_c*colours + beta_w*weights + random_variation
+  return(reproduction)
+}
+```
+
+Our objective today is to revisit DAGS, and how we use statistical models to test if our DAGs are consistent with our data.
+
+“DAGs are used to represent causal relationships within a given system. A DAG consists of a set of nodes (variables) that are connected to each other by edges (arrows). These arrows represent causal relationships between variables, pointing from cause to effect, with causes preceding their effects.”
+
+(Arif & MacNeil, 2023) \<- Fantastic paper about DAGS out of our lab! See bottom for reference.
+
+Once we have created a DAG, we can test it against our observed data to check for DAG-data consistency.
+
+What does this mean? A DAG often asserts multiple independencies (variables are considered to be independent of each other) that should be true in our data, if both the DAG and our data are representative of the system.
+
+In a DAG, a pair of variables can be independent of each other (e.g., Weight is independent of Colour) if there are no paths (i.e., a sequence of nodes and arrows) connecting them. Also, a pair of variables can be conditionally independent.
+
+Conditional independencies emerge from separating the dependency (blocking the path).
+
+For our DAG to be considered consistent with our data, all the independencies & conditional independencies need to hold true in our observed data. We can test for these.
+
+## Fork
+
+When a node in our DAG is a common cause of two variables
+
+```{r}
+fork_dag <- dagitty("dag{ Length -> Weight Length -> Colour  }")
+coordinates(fork_dag) <- list(x=c(Length=0, Weight=1, Colour=0), y=c(Length=0, Weight=0, Colour=1))
+drawdag(fork_dag)
+```
+
+```{r}
+# implied independencies of dag
+impliedConditionalIndependencies(fork_dag)
+
+```
+
+What does this mean? We can read this statement as, conditional on us including `Length` in the model , `Weight` should be independent of `Colour` - that is, we should not see an effect if we regress them together
+```{r}
+# number of frogs
+n_frog <- 75
+# generate some lengths
+lengths <- rnorm(n_frog, 0,1)
+# Length -> Weight
+weights <- sim_weight(lengths, 1, 1)
+# Length -> Colour
+colours <- sim_colour(lengths, 1, -1)
+
+# package data
+frog_data <- list(
+  weights=weights,
+  lengths=lengths,
+  colours=colours
+)
+
+# test for independence
+fork_model_full <- ulam(
+  alist(
+    weights ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours + beta_l*lengths,
+    alpha ~ dnorm(0,.2),
+    beta_c ~ dnorm(0, 1),
+    beta_l ~ dnorm(0,.5),
+    sigma ~ dexp(1)
+  ), data=frog_data, chains=1
+)
+
+# Do not include length
+fork_model_no_length <- ulam(
+  alist(
+    weights ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours,
+    alpha ~ dnorm(0,.2),
+    beta_c ~ dnorm(0, 1),
+    sigma ~ dexp(1)
+  ), data=frog_data, chains=1
+)
+plot(coeftab(fork_model_full,fork_model_no_length))
+```
+
+Here you can see when we include length in the model, there is a zero effect size, indicating that colour has no effect on weight, and our independency holds. Our DAG is consistent with our data!
+
+In causal inference we are trying to understand causal effects of one variable on another. Effects (for now) can either be **direct** or **total** and they flow from an **exposure** to an **outcome**.
+
+Exposure and outcome are determined by your research question. Exposure is the variable with the causal effect you want to estimate. This is the cause you're interested in. The outcome is a variable you want to explain / predict. This is the effect you are measuring.
+
+A **direct** effect is the causal influence that flows from an **exposure** to an **outcome** directly along the arrows that connect them, they help us understand mechanisms. A **total** effect is the overall influence of exposure to the outcome through **all** causal pathways, total effects help us understand the overall impact.
+
+```{r}
+# what do i need to adjust for to infer a causal effect
+adjustmentSets(fork_dag, outcome = "Weight", exposure="Colour", effect="total")
+adjustmentSets(fork_dag, outcome = "Weight", exposure="Colour", effect="direct")
+```
+
+Conditioning on / adjusting for / including in your model will close backdoor paths if they exist for all elemental confounds EXCEPT for colliders, where including them will OPEN a backdoor path
+
+```{r}
+# paths
+paths(fork_dag, from = "Weight", to = "Colour")
+paths(fork_dag, from = "Weight", to = "Colour", Z= "Length")
+```
+
+We can see here that by adjusting for length, we have closed the backdoor path between Weight and Colour, and can estimate the true effect of
+
+## Pipe
+
+Here, our causal assumptions are that:
+
+**Length** causes **Colour** which causes **Reproduction**
+
+**Length** causes **Weight** which also causes **Reproduction**
+
+```{r}
+pipe_dag <- dagitty("dag{ Length -> Weight Length -> Colour Colour-> Reproduction Weight-> Reproduction}")
+coordinates(pipe_dag) <- list(x=c(Length=0, Weight=1, Colour=0, Reproduction=1), y=c(Length=0, Weight=0, Colour=1, Reproduction=1))
+drawdag(pipe_dag)
+```
+
+```{r}
+# implied idependencies of dag
+impliedConditionalIndependencies(pipe_dag)
+```
+
+```{r}
+# colour -> reproduction, weight->reproduction
+reproduction <- sim_reproduction(colours, weights, sd=1, beta_c=-1.5, beta_w=1)
+
+# add reproduction to data set
+frog_data$reproduction <- reproduction
+
+# testing for independence
+pipe_model_full <- ulam(
+  alist(
+    reproduction ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours + beta_l*lengths + beta_w*weights,
+    alpha ~ dnorm(0, 0.2),
+    beta_c ~ dnorm(0,1),
+    beta_l ~ dnorm(0, 0.8),
+    beta_w ~ dnorm(0, 0.5),
+    sigma ~ dexp(1)
+  ), data=frog_data, chains=1
+)
+pipe_model_no_cw <- ulam(
+  alist(
+    reproduction ~ dnorm(mu, sigma),
+    mu <- alpha + beta_l*lengths,
+    alpha ~ dnorm(0, 0.2),
+    beta_l ~ dnorm(0, 0.8),
+    sigma ~ dexp(1)
+  ), data=frog_data, chains=1
+)
+plot(coeftab(pipe_model_full,pipe_model_no_cw))
+```
+
+```{r}
+# what do i need to adjust for to infer a total causal effect
+adjustmentSets(pipe_dag, exposure="Length", outcome = "Reproduction", effect="total")
+
+# what do i need to adjust for to infer a direct causal effect
+adjustmentSets(pipe_dag, exposure="Length", outcome = "Reproduction", effect="direct")
+```
+
+What about the backdoor paths?
+
+```{r}
+# paths
+paths(pipe_dag, from = "Length", to = "Reproduction")
+paths(pipe_dag, from = "Length", to = "Reproduction", Z= c("Colour", "Weight"))
+```
+
+## Collider
+
+When a variable has two separate causes. Adjusting for colliders opens back door paths
+
+```{r}
+collider_dag <- dagitty("dag{ Length -> Weight Length -> Colour Colour-> Reproduction Colour->Predation Weight->Predation Weight->Reproduction}")
+coordinates(collider_dag) <- list(x=c(Length=0, Weight=2, Colour=0, Reproduction=2, Predation=1), y=c(Length=0, Weight=0, Colour=2, Reproduction=2, Predation=1))
+drawdag(collider_dag)
+```
+
+```{r}
+impliedConditionalIndependencies(collider_dag)
+```
+
+### Simulate our data.
+
+```{r}
+# colour -> predation, weight -> predation
+predation <- sim_predation(colours, weights, sd=1, beta_c=1.5, beta_w=1)
+
+# add predation to data set
+frog_data$predation <- predation
+```
+
+```{r}
+# Lngt _||_ Prdt | Colr, Wght
+predation_model <- ulam(
+  alist(
+    predation ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours + beta_l*lengths + beta_w*weights,
+    alpha ~ dnorm(0,0.2),
+    beta_c ~ dnorm(0,1),
+    beta_l ~ dnorm(0,0.2),
+    beta_w ~ dnorm(0,0.5),
+    sigma ~ dexp(1)
+  ), data=frog_data, chains=1
+)
+# Lngt _||_ Rprd | Colr, Wght
+predation_model2 <- ulam(
+  alist(
+    predation ~ dnorm(mu, sigma),
+    mu <- alpha + beta_c*colours + beta_r*reproduction + beta_w*weights,
+    alpha ~ dnorm(0,1),
+    beta_c ~ dnorm(0,1),
+    beta_l ~ dnorm(0,0.2),
+    beta_r ~ dnorm(0,1),
+    beta_w ~ dnorm(0,0.5),
+    sigma ~ dexp(1)
+  ), data=frog_data, chains=1
+)
+plot(coeftab(predation_model, predation_model2))
+```
+
+Again, our conditional independencies hold true and we have DAG-DATA Consistency.
+
+What about our causal inference?
+
+```{r}
+# what do i need to adjust for to infer a total causal effect
+adjustmentSets(collider_dag, exposure="Length", outcome = "Reproduction", effect="total")
+
+# what do i need to adjust for to infer a direct causal effect
+adjustmentSets(collider_dag, exposure="Length", outcome = "Reproduction", effect="direct")
+```
+
+```{r}
+# paths
+paths(collider_dag, from = "Length", to = "Reproduction")
+paths(collider_dag, from = "Length", to = "Reproduction", Z="Predation")
+```
+
+References 1. Arif S, MacNeil MA. Applying the structural causal model framework for observational causal inference in ecology. Ecological Monographs. 2023;93(1):e1554. 2. Mcelreath R. Statistical Rethinking 2 A Bayesian Course with Examples in R and Stan Second Edition. 2nd ed. 2020.
