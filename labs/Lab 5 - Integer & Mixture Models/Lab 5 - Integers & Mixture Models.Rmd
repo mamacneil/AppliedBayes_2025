@@ -1,0 +1,545 @@
+---
+title: "Lab 5 - Integer & Mixture Models"
+output: html_document
+date: "2025-10-30"
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Models for Count Data
+
+Today, we are working through the first in our series in Generalized
+Linear Models (glms), the most useful glms deal with counts
+(non-negative integers). Count data can be difficult to predict with our
+models as the scale of our predictors are never the same as our outcome
+scale
+
+-   Binomial regression - used when data is binary, present/absent, 0/1.
+-   Poisson regression - used when count data has a unknown maximum.
+
+## Setup Environment
+
+```{r}
+# load packages
+library(rethinking)
+# clear environmental variables
+rm(list=ls())
+```
+
+## Binomial Regression
+
+Binomial regressions are also called **logistic regression** when data
+is in single-trial cases,\
+or an **aggregated binomial regression** when the outcome is from 0 -\>
+n (number of total trials). \### Load Data
+
+```{r}
+fdata <- read.csv2('frogs.csv')
+precis(fdata)
+```
+
+### Visualize Data
+
+```{r}
+plot(northing ~ easting, data = fdata, pch = c(1, 16)[fdata$pres.abs +
+1], col=col.alpha("deepskyblue4", .7) ,xlab = "Meters east of reference point", ylab = "Meters north")
+```
+
+### Transform and Package Data
+
+```{r}
+model_data <- list(
+  pressence = fdata$pres.abs,
+  avgrain = standardize(fdata$avrain),
+  distance = standardize(fdata$distance),
+  pools = standardize(fdata$NoOfPools)
+)
+```
+
+### Model Notation
+
+$$
+\large{
+\begin{align*}
+Pressence \sim Binomial(1, p)\\
+p = invlogit(alpha + betaR*avrain + betaP*pools + betaD*distance)\\
+alpha \sim Normal(0,1.6)\\
+beta R \sim Normal(?,?)\\
+beta P \sim Normal(?,?)\\
+beta D \sim Normal(?,?)\\
+\end{align*}}
+$$
+
+What priors should we start with here for our predictors?? Our beta
+parameters here are representing the change in the log odds of finding a
+frog when each have been increased by 1. For me, I am not great at
+thinking about log odds so I will try some flat priors here as well.
+
+### Fit Model & Prior Predictive Checks
+
+```{r}
+frog_full_model <- ulam(
+  alist(
+    pressence ~ dbinom(1, p),
+    logit(p) <- alpha + beta_rain*avgrain + beta_dist*distance + beta_pools*pools,
+    alpha ~ dnorm(0,1.6),
+    beta_rain ~ dnorm(0, 1),
+    beta_dist ~ dnorm(0, 1),
+    beta_pools ~ dnorm(0, 1)
+  ), data = model_data, chains = 4, log_lik = T
+)
+```
+
+```{r}
+# extract priors
+prior2 <- extract.prior(frog_full_model)
+prior_p <- link(frog_full_model, post=prior2)
+plot(density(prior_p), main="Prior prediction (outcome)", col="deepskyblue4", xlab="Probability of occurence")
+```
+
+```{r}
+frog_full_model <- ulam(
+  alist(
+    pressence ~ dbinom(1, p),
+    logit(p) <- alpha + beta_rain*avgrain + beta_dist*distance + beta_pools*pools,
+    alpha ~ dnorm(0,1.6),
+    beta_rain ~ dnorm(0, 0.5),
+    beta_dist ~ dnorm(0, 0.5),
+    beta_pools ~ dnorm(0, 0.5)
+  ), data = model_data, chains = 4, log_lik = T
+)
+prior2 <- extract.prior(frog_full_model)
+prior_p <- link(frog_full_model, post=prior2)
+plot(density(prior_p), main="Prior prediction (outcome)", col="deepskyblue4", xlab="Probability of occurence")
+```
+
+### Model Convergence
+
+```{r}
+precis(frog_full_model)
+traceplot(frog_full_model, pars=c('alpha', 'beta_rain', 'beta_dist', 'beta_pools'))
+```
+
+### Posterior Summaries
+
+```{r}
+plot(coeftab(frog_full_model))
+```
+
+#### Inference
+
+-   alpha
+
+    -   Log-odds: -0.74
+
+    -   Odds: e\*\*-0.74 = 0.48
+
+    -   Probability: invlogit(-0.74) = 32%
+
+    -   With all predictors @ 0, frogs are present about %32 of the time
+
+-   beta_rain
+
+    -   Log-odds: -0.08, for each unit increase in average rain,
+        log-odds decrease by 0.08
+
+    -   Odds: e\*\*-0.08 = 0.92
+
+    -   Probability: 48%
+
+-   beta_distance
+
+    -   Log-odds: 1.21
+
+    -   Odds: 0.3
+
+    -   Probability: 0.22
+
+    -   For every unit of distance frogs are 3 times less likely to be
+        present
+
+-   beta_pools
+
+    -   Log-odds: 0.32
+
+    -   Odds: 1.38
+
+    -   Probability: 0.57
+
+    -   Each additional pool increase the odds of finding a frog by 1.38
+
+### Posterior Predictive
+
+```{r}
+# get pools with frogs but low probability
+pres_low <- model_data$pressence == 1 & mean_p < 0.3
+# get pools with no frogs but high probability
+pres_high <- model_data$pressence == 0 & mean_p > 0.6
+
+par(mfrow=c(1,2))
+plot(northing ~ easting, data = fdata, pch = c(1, 16)[fdata$pres.abs +
+1], col=c("deepskyblue4","orange")[factor(pres_low)] ,xlab = "Meters east of reference point", ylab = "Meters north", main="Pools with no frogs but high prob")
+
+plot(northing ~ easting, data = fdata, pch = c(1, 16)[fdata$pres.abs +
+1], col=c("deepskyblue4","red")[factor(pres_high)] ,xlab = "Meters east of reference point", ylab = "Meters north", main="Pools with frogs but low prob")
+```
+
+## Poisson Regression
+
+Today we are going to be going through 2 different model types that also
+deal with count data.
+
+1.  Poisson regression - used when count data has an unknown maximum.
+2.  Zero-inflated Poisson - used when data have a count of zero that
+    arises from multiple process (mixture model)
+
+As mentioned previously, Poisson GLMs are useful when the upper bound of
+the count data in unknown. For example, how many PhD applications will
+be submitted to Biology this year?. For this we can use a Poisson
+distribution, that can model binomial events for which the number of
+trials is unknown, or so big it's basically unknown.
+
+For an example of this we will work through the predicting the effect of
+population size on tool use/complexity in Oceania.
+
+### Load Data
+```{r}
+data(Kline)
+tdata <- Kline
+precis(tdata)
+```
+### Transform Data
+```{r}
+# set up our data
+# create and standardize log pop
+tdata$logpop <- standardize(log(tdata$population))
+# create a contact_id, 1 = low, 2 = high
+tdata$contact_level <- ifelse( tdata$contact == "high", 2, 1)
+precis(tdata)
+```
+### Model Notation
+$$
+\large{
+\begin{align*}
+ToolUse_i \sim {\sf Poisson(\lambda_i)}\\
+log(\lambda_i) = alpha_{[contact]} + beta\_pop_{[contact]}*logPop\\
+alpha_{[contact]} \sim {\sf Normal(?, ?)}\\
+beta\_pop_{[contact]} \sim {\sf Normal(?, ?)}\\
+\end{align*}
+}
+$$ 
+How did we choose priors? Like with the binomial we need to link the scale of out predictors to our outcome scale.
+For the binomial models we used a logit link function. With Poisson models, we use a log link function.
+As with the binomial a flat prior on the predictors is not necessarily flat on the outcome scale.
+
+### Prior Predictive
+```{r}
+# lets start with a vague prior for the intercept on the normal scale, where x is the mean number of tools
+par(mfrow=c(1,2))
+curve( dnorm( x , 0 , 10 ) , from=0 , to=100 , n=200, main="alpha ~ dnorm(0,10)" )
+# on the outcome scale however
+curve( dlnorm( x , 0 , 10 ) , from=0 , to=100 , n=200, main="alpha ~ dlnorm(0,10)")
+# so this is implying around 0 tools on average, ouch.
+
+# McElreaths' weakly informative suggestion for priors looks like this 
+curve( dlnorm( x , 3 , 0.5 ) , from=0 , to=100 , n=200, main="alpha ~ dlnorm(3,0.5)")
+```
+```{r}
+# pull samples from our priors, lets start with the beta_pop @ N(0,10)
+set.seed(10)
+N <- 100
+alpha <- rnorm( N , 3 , 0.5 ) 
+beta_pop <- rnorm( N , 0 , 10 )
+plot( NULL , xlim=c(-2,2) 
+      , ylim=c(0,100) , xlab="log population" , ylab="total tools", col="blue" ) 
+for ( i in 1:N ) curve( exp( alpha[i] + beta_pop[i]*x ) , add=TRUE , col=grau() )
+mtext("alpha ~ N(3,.5), beta_pop ~ N(0,10)")
+```
+The prior relationships are anchored around 0, mean standardized log population, this make sense. But the relationship between logpop and tool use either explodes to infinity or goes to zero just above and below the mean, which doesn;t really make any sense.
+
+```{r}
+set.seed(10)
+N <- 100
+alpha <- rnorm( N , 3 , 0.5 ) 
+beta_pop <- rnorm( N , 0 , 0.2 )
+plot( NULL , xlim=c(-2,2) 
+      , ylim=c(0,100) , xlab="log population" , ylab="total tools", col="blue" ) 
+for ( i in 1:N ) curve( exp( alpha[i] + beta_pop[i]*x ) , add=TRUE , col=grau() )
+mtext("alpha ~ N(3,.5), beta_pop ~ N(0,0.2)")
+```
+Definitely in the ballpark of data capture most of the trends and allows for some explosive options Lets take a look at this on the natural scale as well. While it is easier to fit priors on the outcome scale, it is difficult to think in standardized log population. Let's put these priors on the real scale to see how they look.
+
+```{r}
+# generate log population to plot over
+pop_seq <- seq( from=log(100) , to=log(20000) , length.out=100 )
+# calculate lambda, and place linear model in an exponential function (i.e. inverse_log)
+lambda <- sapply( pop_seq , function(x) exp( alpha + betaP*x ) )
+plot( NULL , xlim=range(exp(pop_seq)),
+      ylim=c(0,60) , xlab="population" , ylab="total tools", col="blue" ) 
+for ( i in 1:N ) lines( exp(pop_seq) , lambda[i,] , col=grau() , lwd=1.5 )
+```
+We can see the model imposes diminishing returns on population (The curves bend down and level off) so that each additional person contributes a smaller increase in the expected number of tools. Let's run our interaction model.
+
+### Package Data
+```{r}
+model_data <- list(
+  total_tools = tdata$total_tools,
+  logpop = tdata$logpop,
+  contact =  tdata$contact_level
+)
+```
+
+### Fit Model
+```{r}
+# setup and run model
+model_tools <- ulam(
+  alist(
+    total_tools ~ dpois(lambda), # data likelihood
+    log(lambda) <- alpha[contact] + beta_pop[contact]*logpop,
+    alpha[contact] ~ dnorm(3,0.5),
+    beta_pop[contact] ~ dnorm(0,0.2)
+  ), data=model_data, chains=4, cores=4
+)
+```
+### Model Convergence
+```{r}
+precis(model_tools, depth=2)
+traceplot(model_tools)
+```
+### Posterior Summaries
+```{r}
+plot(coeftab(model_tools))
+```
+```{r}
+exp(precis(model_tools, depth=2))
+plot(precis(model_tools, depth=2))
+```
+### Posterior Predictive
+```{r}
+# observed vs predicted
+total_mu <- link(model_tools)
+total_mu_mean <- apply(total_mu, 2, mean)
+
+plot(tdata$total_tools ~ total_mu_mean, xlab="Predicted tools", ylab="Observed tools", col="deepskyblue4", pch=16, main="Observed vs Predicted")
+abline( a=0, b=1 , lty=2 ) 
+```
+```{r, fig.width = 15, fig.height = 5}
+par(mfrow=c(1,2))
+# posterior prediction plots
+# set up the horizontal axis values to compute predictions at 
+logpop_seq <- seq( from=-1.4 , to=3 , length.out=100 ) 
+
+# predictions for contact_level=1 (low contact) 
+lambda <- link( model_tools , data=data.frame( logpop=logpop_seq , contact=1 ) ) 
+lmu <- apply( lambda , 2 , mean ) 
+lci <- apply( lambda , 2 , PI ) 
+plot( model_data$logpop , model_data$total_tools , xlab="log population (std)" , ylab="total tools" , col=rangi2 , pch=ifelse( model_data$contact==1 , 1 , 16 ) , lwd=2 , ylim=c(0,75))
+lines( logpop_seq , lmu , lty=2 , lwd=1.5 ) 
+shade( lci , logpop_seq , xpd=FALSE ) 
+
+# predictions for contact_level=2 (high contact) 
+lambda <- link( model_tools , data=data.frame( logpop=logpop_seq , contact=2 ) ) 
+lmu <- apply( lambda , 2 , mean ) 
+lci <- apply( lambda , 2 , PI ) 
+lines( logpop_seq , lmu , lty=1 , lwd=1.5 ) 
+shade( lci , logpop_seq , xpd=FALSE )
+legend("topleft", legend=c("Low Contact", "High Contact"), pch=c(1, 16), lty=c(2,1), col=c(rangi2,rangi2))
+
+
+# on natural population scale
+# reverse the standardization
+# 1.53 is the sd(log(pop)) and 9 is mean(log(pop))
+
+plot( tdata$population , tdata$total_tools , xlab="population" , ylab="total tools" , col=rangi2 , pch=ifelse( model_data$contact==1 , 1 , 16 ) , lwd=2 , ylim=c(0,75))
+pop_seq <- exp(logpop_seq*1.53 + 9) 
+
+# predictions for contact_level=1 (low contact) 
+lambda <- link( model_tools , data=data.frame( logpop=logpop_seq , contact=1 ) ) 
+lmu <- apply( lambda , 2 , mean ) 
+lci <- apply( lambda , 2 , PI ) 
+lines( pop_seq , lmu , lty=2 , lwd=1.5 ) 
+shade( lci , pop_seq , xpd=FALSE ) 
+
+# predictions for contact_level=2 (high contact) 
+lambda <- link( model_tools , data=data.frame( logpop=logpop_seq , contact=2 ) ) 
+lmu <- apply( lambda , 2 , mean ) 
+lci <- apply( lambda , 2 , PI ) 
+lines( pop_seq , lmu , lty=1 , lwd=1.5 ) 
+shade( lci , pop_seq , xpd=FALSE ) 
+legend("topleft", legend=c("Low Contact", "High Contact"), pch=c(1, 16), lty=c(2,1), col=c(rangi2,rangi2))
+```
+
+## Mixture Models
+**Mixture Models** Sometimes our data isn't generated from a single
+process, sometimes it can arise through multiple processes. A mixture
+model uses more than one probability distribution to model a mixture of
+causes. In effect, these models use more than one likelihood for the
+same outcome variable.
+
+Count variables are especially prone to needing a mixture treatment. The
+reason is that a count of zero can often arise more than one way. A
+"zero" means that nothing happened, and nothing can happen either
+because the rate of events is low or rather because the process that
+generates events failed to get started.
+
+**Zero-inflated Poisson**
+
+The Zero-inflated poisson utilize different likelihoods of models we
+have learnt before, and combine them to handle different situations. And
+the zero-inflated poisson mixes a binary event (binomial) with an
+ordinary poisson likelihood.
+
+We will be running through the Monks, drinking manuscripts example, and
+then modifying it to include a Poisson offset to take into account rates
+that differ.
+
+So we have a monastery that produces manuscripts, so every day a large
+number of monks finish copying a small number of manuscripts, Some days
+the monks decide to take the day off and drink instead, as the owner of
+this monastery, we would like to know how many days the monks spend
+drinking.
+### Generate Data
+```{r}
+# the probability of drinking, 20% of days are spent drinking
+p <- 0.2 
+
+# average 1.7 manuscript per day 
+work_rate <- 1.7
+
+# number of days
+N <- 365 
+
+# simulate days monks drink 
+drinking <- rbinom( N , 1 , p ) 
+
+# simulate manuscripts per day
+manuscripts <- (1-drinking)*rpois( N , work_rate )
+
+# data list
+data_list <- list(
+  manuscripts = manuscripts
+)
+```
+
+### Model Notation
+$$
+\large{
+\begin{align*}
+Manuscripts \sim {\sf ZIPoisson(p_i, \lambda_i)}\\
+logit(p_i) = alphaP_i\\
+log(\lambda_i) = alphaL_i\\
+alphaP \sim {\sf Normal(-1.5, 1)}\\
+alphaL \sim {\sf Normal(1, 0.5)}\\
+\end{align*}
+}
+$$
+
+
+### Fit Model & Prior Predictive Checks
+```{r}
+# pull samples from our priors
+set.seed(10)
+N <- 100
+par(mfrow=c(1,2))
+prior_pdrink <- inv_logit(rnorm( N , -1.5 , 1 ))
+plot(density(prior_pdrink), main="Drinking (p) prior N(-1.5,1)")
+
+prior_mrate <- exp(rnorm(N, 0 , 0.5 ) )
+plot(density(prior_mrate), main="Manuscript (lambda) prior N(0,0.5)")
+```
+
+```{r}
+model_monk <- ulam( 
+  alist( 
+    manuscripts ~ dzipois( p , lambda ), 
+    logit(p) <- alphaP, # probability of drinking 
+    log(lambda) <- alphaL, # rate of work
+    alphaP ~ dnorm( -1.5 , 1 ), 
+    alphaL ~ dnorm( 1 , 0.5 ) 
+    ), data=data_list , chains=4 ) 
+```
+
+### Model Convergence
+```{r}
+precis(model_monk)
+traceplot(model_monk)
+```
+### Posterior Summaries
+```{r}
+plot(coeftab(model_monk))
+```
+### Posterior Predictive
+```{r}
+posterior <- extract.samples(model_monk)
+
+posterior_pdrink <- inv_logit(posterior$alphaP)
+posterior_mrate <- exp(posterior$alphaL)
+
+par(mfrow=c(1,2))
+plot(density(posterior_pdrink), main="Posterior drinking probability")
+abline(v=0.2)
+plot(density(posterior_mrate), main="Posterior manuscript rate")
+abline(v=1.7)
+```
+So we have our monastery and it is producing manuscripts at rates of about 1.7 per day. Since they are a manuscript powerhouse, we have enough money to go buy another monastery. So we know how much to offer, we want to compare the manuscript rate of the new monastery to our own. However, the problem here is that the data recorded for this new monastery is weekly and not daily like ours. How are we supposed to model and compare processes operating at different rates?
+
+We can include a offset term in the Poisson linear model. Simply, this offset is the log() of the rate in our data, and we can include that in our model, so in the background the model will be able to adjust for these differing rates.\
+If you want a mathematical breakdown of how this works, you can check out pg. 357 in the textbook.
+
+### Log-Offset 
+#### Generate Data
+```{r}
+# including an offset for differing rates
+# our monastery
+num_days <- 365
+monastary_1 <- rpois( num_days , 1.5 )
+# new monastery
+num_weeks <- 52 
+monastary_2 <- rpois( num_weeks , 0.5*7 )
+
+# combine data
+manuscripts <- c( monastary_1 , monastary_2 ) 
+# 1 day for our monastery and 7 days for the new one
+days <- c( rep(1,365) , rep(7,52) )
+# create an id for each monastery, 0 for ours and 1 for the new one,
+monastery_id <- c( rep(0,365) , rep(1,52) ) 
+
+data_monasteries <- data.frame(manuscripts=manuscripts, days=days, 
+                              monastery_id=monastery_id)
+
+# create our off set term, as each monastery operates at different rates
+data_monasteries$logdays <- log(data_monasteries$days)
+data_monasteries
+```
+#### Fit Model
+```{r}
+model_monastery <- ulam(
+  alist( 
+    manuscripts ~ dpois(lambda ), 
+    log(lambda) <- alpha + b*monastery_id + logdays,
+    alpha ~ dnorm( 1 , 0.5 ),
+    b ~ dnorm(0,1)
+  ), data=data_monasteries, chains=4
+)
+```
+#### Model Convergence
+```{r}
+precis(model_monastery)
+traceplot(model_monastery)
+```
+#### Posterior Predictive
+```{r}
+posterior <- extract.samples(model_monastery)
+current_mrate <- exp(posterior$alpha)
+new_monastery_mrate <- exp(posterior$alpha + posterior$b)
+precis( data.frame( current_mrate , new_monastery_mrate ) )
+```
+
+```{r}
+plot(density(current_mrate), xlim=c(0,2), ylim=c(0, 12), col="deepskyblue4", main="Posterior manuscript rates", lwd=2)
+lines(density(new_monastery_mrate), col="orange", lwd=2)
+legend("topright", legend = c("Current Monastery", "New Monastery"), col=c("deepskyblue4", "orange"), lty=1)
+```
+
+We can see that the second monastery, produces about 1/3 of the manuscripts that our current one does each day. I guess we shouldn't pay too much.
