@@ -1,0 +1,1213 @@
+---
+title: "The Causaly Principled Bayesian"
+output: html_document
+date: "2025-11-05"
+---
+
+```{r}
+library(rethinking)
+library(bayesplot)
+library(dagitty)
+library(ggplot2)
+rm(list=ls())
+```
+
+# The Causally Principled Bayesian
+
+1.  Causal question
+2.  Pick initial model
+3.  Prior predictive simulation\*
+4.  Fit model
+5.  Validate computation\*
+6.  Evaluate model\*
+7.  Compare models
+
+## Data Visualisation
+
+```{r}
+# import and view data
+data <- read.csv2('bman_coho.csv', sep = ',')
+head(data, 20)
+precis(data)
+
+# R and S are considered chacrters going to force them to be numeric
+data$S <- as.numeric(data$S)
+data$R <- as.numeric(data$R)
+```
+
+## Causal Inference (DAG)
+
+```{r}
+coho_dag <- dagitty("dag{ Spawners -> Recruits River -> Recruits River->Spawners  }")
+coordinates(coho_dag) <- list(x=c(Spawners=0, Recruits=1, River=0), y=c(Spawners=0, Recruits=0, River=1))
+drawdag(coho_dag)
+```
+
+### Causal Question, Assumptions, DAG-Data Consistency and Adjustment Sets
+
+#### Question: What is the total effect of spawners on recruits?
+
+#### Assumptions
+
+-   The characteristics of river affect the health and condition of spawners and recruits
+-   The more spawners there are the more potential recruits we will have next year. \#### DAG-Data Consistency and Adjustment Sets
+
+```{r}
+impliedConditionalIndependencies(coho_dag)
+adjustmentSets(coho_dag, exposure="Spawners", outcome = "Recruits", effect = "direct")
+```
+
+There are no implied conditional independencies to check for, and to estimate the total effect we need to ensure we are including river in the model.
+
+```{r}
+# package and transform data
+coho_data <- list(
+  recruits = standardize(data$R),
+  spawners = standardize(data$S)
+)
+
+# keep scale parameters saved for back transform
+scale_params <- list(
+  recruits_mean = mean(as.numeric(data$R)),
+  recruits_sd = sd(as.numeric(data$R)),
+  spawners_mean = mean(as.numeric(data$S)),
+  spawners_sd = sd(as.numeric(data$S))
+)
+
+```
+
+```{r}
+# plot recruits and spawners
+plot(recruits ~ spawners, data=coho_data, xlab="Spawners (km)", ylab="Recruits (km)", pch = 16, col=col.alpha("black", 0.4))
+```
+
+```{r}
+# plot recruits and spawners per river
+# give me a list with only the unique river names
+rivers <- unique(data$river)
+
+# 3 column, 3 row plotting grid, best to run in console
+par(mfrow=c(3,3))
+# for each river, produce a plot of spawners vs recruits
+for (i in 1:length(rivers)) {
+  plot(R ~ S, data = data[data$river == rivers[i],], xlab=rivers[i], ylab="Recruits (km)", col=col.alpha("black", 0.4), pch=16)
+}
+```
+
+## Initial Model: Pooled Model
+
+### Model Notation
+
+$$
+\begin{align*}
+Recruits \sim Normal(mu, sigma) \\
+mu = alpha + beta\_spawn*Spawners \\
+alpha \sim Normal(0, 0.1) \\
+beta\_spawn \sim Normal(0, 1) \\
+sigma \sim Exponential(1)
+\end{align*}
+$$
+
+### Fit Model & Prior Predictive Simulations
+#### Standard Prior, N(0,1)
+```{r}
+coho_pooled <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha + beta_spawn*spawners,
+    alpha ~ normal(0, 0.1),
+    beta_spawn ~ normal(0, 0.1),
+    sigma ~ exponential(1)
+  ), data = coho_data, chains = 4, log_lik = T
+)
+
+# extract prior
+coho_pooled_prior <- extract.prior(coho_pooled)
+
+# generate sequence of spawners for "data" and plotting
+spawners_seq <- seq(from=-2, to=8, length.out=185)
+
+# get prior predictions for mu <- alpha + beta_spawn*spawners
+prior_mu <- link(coho_pooled, post=coho_pooled_prior, data=list(spawners=spawners_seq))
+# get the mean for each observation
+prior_mean_mu <- apply(prior_mu, 2, mean)
+# calculate the HPDI @ 97 %
+prior_mean_hdpi <- apply(prior_mu, 2, HPDI, .97)
+
+# simulate predictions from prior
+y_prior <- sim(coho_pooled, post = coho_pooled_prior,
+               data = list(spawners = coho_data$spawners),
+               n = 1000)
+
+y_prior <- as.matrix(y_prior)
+
+# back transform
+y_prior_orig <- y_prior * scale_params$recruits_sd + scale_params$recruits_mean
+y_obs_orig <- as.numeric(coho_data$recruits) * scale_params$recruits_sd + scale_params$recruits_mean
+
+alpha_orig <- coho_pooled_prior$alpha * scale_params$recruits_sd + scale_params$recruits_mean
+beta_orig <- coho_pooled_prior$beta_spawn * (scale_params$recruits_sd / scale_params$spawners_sd)
+
+# plot priors on original scale
+par(mfrow = c(1, 2))
+hist(coho_pooled_prior$alpha, main = "Intercept (std)", 
+     xlab = "Recruits when Spawners = 0", breaks = 30)
+hist(coho_pooled_prior$beta_spawn, main = "Slope (std)", 
+     xlab = "Change in Recruits per Spawner", breaks = 30)
+par(mfrow = c(1, 2))
+hist(alpha_orig, main = "Intercept (unstd)", 
+     xlab = "Recruits when Spawners = 0", breaks = 30)
+hist(beta_orig, main = "Slope (unstd)", 
+     xlab = "Change in Recruits per Spawner", breaks = 30)
+ppc_dens_overlay(y_obs_orig, y_prior_orig[1:50,]) +
+  xlab("Recruits (km)") +
+  theme_minimal()
+
+```
+
+```{r}
+coho_pooled_prior <- extract.prior(coho_pooled)
+prior_draws <- as.matrix(as.data.frame(coho_pooled_prior))
+
+# Visualize on standardized scale
+mcmc_dens(prior_draws, pars = c("alpha", "beta_spawn", "sigma")) +
+  ggtitle("Prior Distributions (Standardized Scale)") +
+  theme_minimal()
+```
+
+### Slightly regularised Prior, N(0,0.5)
+```{r}
+coho_pooled <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha + beta_spawn*spawners,
+    alpha ~ normal(0, .5),
+    beta_spawn ~ normal(0, .5),
+    sigma ~ exponential(1)
+  ), data = coho_data, chains = 4, log_lik = T
+)
+
+# extract prior
+coho_pooled_prior <- extract.prior(coho_pooled)
+
+# generate sequence of spawners for "data" and plotting
+spawners_seq <- seq(from=-2, to=8, length.out=185)
+
+# get prior predictions for mu <- alpha + beta_spawn*spawners
+prior_mu <- link(coho_pooled, post=coho_pooled_prior, data=list(spawners=spawners_seq))
+# get the mean for each observation
+prior_mean_mu <- apply(prior_mu, 2, mean)
+# calculate the HPDI @ 97 %
+prior_mean_hdpi <- apply(prior_mu, 2, HPDI, .97)
+
+plot(recruits ~ spawners, data=coho_data, 
+     xlab="Spawners (km)", 
+     ylab="Recruits (km)", 
+     main="Regularised N(0,0.5) prior",
+     pch = 16, 
+     col=col.alpha("black", 0.4))
+lines(spawners_seq, prior_mean_mu, lwd=2, col="black")
+shade(prior_mean_hdpi,spawners_seq )
+legend("topleft", 
+       legend = c("Prior mean", "97% HPDI"),
+       col = c("black", "gray"),
+       lty = c(1, NA),
+       lwd = c(2, NA),
+       pch = c(NA, 15),
+       xpd = TRUE, 
+       bty = "n")
+```
+### Wider Prior, N(0,1.2)
+```{r}
+coho_pooled <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha + beta_spawn*spawners,
+    alpha ~ normal(0, 1.2),
+    beta_spawn ~ normal(0, 1.2),
+    sigma ~ exponential(1)
+  ), data = coho_data, chains = 4, log_lik = T
+)
+
+# extract prior
+coho_pooled_prior <- extract.prior(coho_pooled)
+
+# generate sequence of spawners for "data" and plotting
+spawners_seq <- seq(from=-2, to=8, length.out=185)
+
+# get prior predictions for mu <- alpha + beta_spawn*spawners
+prior_mu <- link(coho_pooled, post=coho_pooled_prior, data=list(spawners=spawners_seq))
+# get the mean for each observation
+prior_mean_mu <- apply(prior_mu, 2, mean)
+# calculate the HPDI @ 97 %
+prior_mean_hdpi <- apply(prior_mu, 2, HPDI, .97)
+
+plot(recruits ~ spawners, data=coho_data, 
+     xlab="Spawners (km)", 
+     ylab="Recruits (km)", 
+     main="Wider N(0,1.2x) prior",
+     pch = 16, 
+     col=col.alpha("black", 0.4))
+lines(spawners_seq, prior_mean_mu, lwd=2, col="black")
+shade(prior_mean_hdpi,spawners_seq )
+legend("topleft", 
+       legend = c("Prior mean", "97% HPDI"),
+       col = c("black", "gray"),
+       lty = c(1, NA),
+       lwd = c(2, NA),
+       pch = c(NA, 15),
+       xpd = TRUE, 
+       bty = "n")
+```
+### Validate Computation
+And now we want to check how well our model was at fitting the model.
+We check for:
+#### Convergence Diagnostics
+```{r}
+precis(coho_pooled)
+
+# trace plots using library(bayesplot)
+# get stan posterior draws
+posterior_draws <- coho_pooled@cstanfit$draws(format="array")
+# mcmc_combo gives you a combo plot of the "density overlay" and "trace" plots
+mcmc_combo(posterior_draws, 
+           combo = c("dens_overlay", "trace"), 
+           pars=c("alpha", "beta_spawn", "sigma"))
+```
+#### Fake-Data Validation
+```{r}
+# set "true" values
+true_alpha <- 0.2
+true_beta_spawn <- 0.5
+true_sigma <- 0.8
+
+# generate spawners
+n_spawn <- 185
+sim_spawners <- rnorm(n_spawn, 0 , 1)
+
+# generate recruits
+mu_recruit <- true_alpha + true_beta_spawn * sim_spawners
+sim_recruits <- rnorm(n_spawn, mu_recruit, true_sigma)
+
+# package data
+fake_coho <- list(
+  recruits = sim_recruits,
+  spawners = sim_spawners
+)
+
+# fit model
+coho_pooled_fake <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha + beta_spawn*spawners,
+    alpha ~ normal(0, 1),
+    beta_spawn ~ normal(0, 1),
+    sigma ~ exponential(1)
+  ), data = fake_coho, chains = 4, log_lik = T
+)
+
+# check posterior estimates for true value
+precis(coho_pooled_fake)
+
+# get posterior draws for plotting
+fake_coho_draws <- coho_pooled_fake@cstanfit$draws(format="array")
+mcmc_dens_overlay(fake_coho_draws, pars=c("alpha", "beta_spawn", "sigma")) +
+  geom_vline(data = data.frame(
+  Parameter = c("alpha", "beta_spawn", "sigma"),
+  xintercept = c(true_alpha, true_beta_spawn, true_sigma)), 
+             aes(xintercept = xintercept),
+             linetype = "solid", 
+             color = "red") +
+  theme_minimal()
+```
+### Evaluate and use Model
+#### Posterior predictive check
+```{r}
+# observed vs predicted
+coho_pooled_mu <- link(coho_pooled)
+coho_pooled_mean <- apply(coho_pooled_mu, 2, mean)
+coho_pooled_HPDI <- apply(coho_pooled_mu, 2, HPDI, prob=.96)
+
+plot( coho_pooled_mean ~ coho_data$recruits, col=col.alpha("deepskyblue4", 0.4), pch=16, lwd=2, xlab="Observed Recruits", ylab="Predicted Recruits" ) 
+abline( a=0 , b=1 , lty=2 ) 
+for ( i in 1:185 ) lines( rep(coho_data$recruits[i],2) , coho_pooled_HPDI[,i] , col="deepskyblue4" )
+```
+```{r}
+# posterior predictions
+# observed data
+y_obs <- as.numeric(coho_data$recruits)
+
+draws <- as_draws_df(posterior_draws)
+
+# generate predictions from our model
+y_pred <- sim(coho_pooled, n = 1000)
+y_pred <- as.matrix(y_pred)
+
+ppc_dens_overlay(y_obs, y_pred[1:50,]) +
+  theme_minimal()
+```
+```{r}
+# plot the predicted regression
+coho_pooled_mu <- link(coho_pooled, data = list(spawners=spawners_seq))
+coho_pooled_mean <- apply(coho_pooled_mu, 2, mean)
+coho_pooled_HPDI <- apply(coho_pooled_mu, 2, HPDI, prob=.96)
+
+plot(recruits ~ spawners, data=coho_data  ,xlab="Spawners (km, std)", lwd=2, ylab="Recruits (km, std)", col=col.alpha("deepskyblue4",0.4),pch=16, main="")
+lines(spawners_seq, coho_pooled_mean, col="orange3", lwd=2)
+shade(coho_pooled_HPDI, spawners_seq)
+
+# back on the real scale = z*sd + mean
+coho_pooled_mean_ustd <- coho_pooled_mean * scale_params$recruits_sd + scale_params$recruits_mean
+coho_pooled_HPDI_ustd <- coho_pooled_HPDI * scale_params$recruits_sd + scale_params$recruits_mean
+spawners_seq_ustd <- seq(0,400, length.out=185)
+  
+plot(R ~ S, data=data  ,xlab="Spawners (km)", lwd=2, ylab="Recruits (km)", col=col.alpha("deepskyblue4",0.4),pch=16, main="")
+lines(spawners_seq_ustd, coho_pooled_mean_ustd, col="orange3", lwd=2)
+shade(coho_pooled_HPDI_ustd, spawners_seq_ustd)
+```
+
+```{r}
+# what about for each river? NB: best to run plot code in console
+# row plotting grid
+par(mfrow=c(4,4),
+    oma = c(0, 0, 2, 0),  
+    mar = c(4, 4, 2, 1))
+# for each river, produce a plot of spawners vs recruits
+for (i in 1:length(rivers)) {
+  plot(R ~ S, data = data[data$river == rivers[i],], xlab=rivers[i], ylab="Recruits (km)", col=col.alpha("black", 0.6), pch=16, xlim=c(0,max(data[data$river == rivers[i],]$S)), ylim=c(0,max(data[data$river == rivers[i],]$R)))
+  lines(spawners_seq_ustd, coho_pooled_mean_ustd, col="orange", lwd=2)
+  shade(coho_pooled_HPDI_ustd, spawners_seq_ustd)
+}
+# add legend to outer margin
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = 'l', bty = 'n', xaxt = 'n', yaxt = 'n')
+legend("top", 
+       legend = c("Pooled Model", "97% HPDI"),
+       col = c("orange", "gray"),
+       lty = c(1, NA),
+       lwd = c(2, NA),
+       pch = c(NA, 15),
+       xpd = TRUE, 
+       horiz = TRUE,
+       bty = "n")
+```
+
+## Modify Model: Unpooled Model
+
+### Model Notation
+
+$$
+\begin{align*}
+Recruits \sim Normal(mu, sigma) \\
+mu = alpha[river] + beta\_spawn[river]*Spawners \\
+alpha[river] \sim Normal(0, 1) \\
+beta\_spawn[river] \sim Normal(0, 1) \\
+sigma \sim Exponential(1)
+\end{align*}
+$$
+### Data Visualisation
+```{r}
+```
+
+### Package Data
+```{r}
+coho_data$river <- as.integer(as.factor(data$river))
+```
+### Fit Model & Prior Predictive Simulations
+
+```{r}
+coho_unpooled <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha[river] + beta_spawn[river]*spawners,
+    alpha[river] ~ normal(0, 0.1),
+    beta_spawn[river] ~ normal(0, 0.1),
+    sigma ~ exponential(1)
+  ), data = coho_data, chains = 4, log_lik = T
+)
+
+# Extract prior
+coho_unpooled_prior <- extract.prior(coho_unpooled)
+
+# Generate sequence of spawners for "data" and plotting
+spawners_seq <- seq(from = -2, to = 8, length.out = 185)
+
+# Get prior predictions for mu <- alpha[river] + beta_spawn[river]*spawners
+# This generates predictions for ALL rivers at once
+prior_mu <- link(coho_unpooled, 
+                 post = coho_unpooled_prior, 
+                 data = list(spawners = coho_data$spawners,
+                            river = coho_data$river))
+
+# Get the mean for each observation
+prior_mean_mu <- apply(prior_mu, 2, mean)
+
+# Calculate the HPDI @ 97%
+prior_mean_hdpi <- apply(prior_mu, 2, HPDI, .97)
+
+# Simulate predictions from prior
+y_prior <- sim(coho_unpooled, 
+               post = coho_unpooled_prior,
+               data = list(spawners = coho_data$spawners,
+                          river = coho_data$river),
+               n = 1000)
+y_prior <- as.matrix(y_prior)
+
+# Back transform
+y_prior_orig <- y_prior * scale_params$recruits_sd + scale_params$recruits_mean
+y_obs_orig <- as.numeric(coho_data$recruits) * scale_params$recruits_sd + scale_params$recruits_mean
+
+# Back transform parameters (flatten river-specific parameters)
+alpha_orig <- c(coho_unpooled_prior$alpha) * scale_params$recruits_sd + scale_params$recruits_mean
+beta_orig <- c(coho_unpooled_prior$beta_spawn) * (scale_params$recruits_sd / scale_params$spawners_sd)
+
+par(mfrow = c(1, 2))
+hist(c(coho_unpooled_prior$alpha), 
+     main = "Intercepts (std)", 
+     xlab = "Alpha across all rivers", 
+     breaks = 30)
+hist(c(coho_unpooled_prior$beta_spawn), 
+     main = "Slopes (std)", 
+     xlab = "Beta across all rivers", 
+     breaks = 30)
+
+par(mfrow = c(1, 2))
+hist(alpha_orig, 
+     main = "Intercepts (unstd)", 
+     xlab = "Recruits when Spawners = 0", 
+     breaks = 30)
+hist(beta_orig, 
+     main = "Slopes (unstd)", 
+     xlab = "Change in Recruits per Spawner", 
+     breaks = 30)
+
+ppc_dens_overlay(y_obs_orig, y_prior_orig[1:50,]) +
+  ggtitle("Prior Predictive: Unpooled Model") +
+  xlab("Recruits (km)") +
+  theme_minimal()
+```
+
+
+```{r}
+coho_unpooled_prior <- extract.prior(coho_unpooled)
+
+# spawners sequence
+spawners_seq <- seq(from = -2, to = 8, length.out = 185)
+
+# Set up multi-panel plot
+par(mfrow = c(3, 3))
+rivers <- unique(coho_data$river)
+
+for (r in rivers) {
+  # Get prior predictions for THIS specific river
+  prior_mu <- link(coho_unpooled,
+                   post = coho_unpooled_prior,
+                   data = list(spawners = spawners_seq,
+                              river = rep(r, length(spawners_seq))))
+  
+  # Summarize
+  prior_mean <- apply(prior_mu, 2, mean)
+  prior_hpdi <- apply(prior_mu, 2, HPDI, prob = 0.96)
+  
+  # Subset list elements for this river
+  river_idx <- which(coho_data$river == r)
+  
+  # Plot this river
+  plot(coho_data$recruits[river_idx] ~ coho_data$spawners[river_idx],
+       xlab = paste("River", r),
+       ylab = "Recruits (km, std)",
+       pch = 16,
+       col = col.alpha("black", 0.4),
+       xlim = range(spawners_seq),
+       ylim = c(-4, 6))
+  
+  lines(spawners_seq, prior_mean, lwd = 2, col = "deepskyblue4")
+  shade(prior_hpdi, spawners_seq, col = col.alpha("deepskyblue4", 0.3))
+}
+```
+### Validate Computation
+And now we want to check how well our model was at fitting the model.
+We check for:
+#### Convergence Diagnostics
+```{r}
+precis(coho_unpooled, depth=2, pars = c("beta_spawn"))
+
+# posterior and trace plots using bayesplot package
+posterior_draws <- coho_unpooled@cstanfit$draws(format="array")
+mcmc_combo(posterior_draws, combo = c("dens_overlay", "trace"), regex_pars=c("^alpha\\[[1-5]\\]$"))
+mcmc_combo(posterior_draws, combo = c("dens_overlay", "trace"), regex_pars=c("^beta_spawn\\[[1-5]\\]$"))
+mcmc_combo(posterior_draws, combo = c("dens_overlay", "trace"), pars=c("sigma"))
+```
+#### Fake-Data Validation
+```{r}
+# set "true" values
+n_rivers <- 14
+true_alpha <- rlnorm(n_rivers, 1, 2)  # different alpha per river
+true_beta_spawn <- rnorm(n_rivers, 0.5, 0.2)  # different beta per river
+true_sigma <- 0.8  # shared across rivers
+
+# generate spawners
+n_spawn <- 185
+n_total <- n_rivers * n_spawn
+
+sim_spawners <- rnorm(n_total, 0 , 1)
+sim_rivers <- rep(1:n_rivers, each = n_spawn)
+
+# generate recruits
+mu_recruit <- true_alpha[sim_rivers] + true_beta_spawn[sim_rivers] * sim_spawners
+sim_recruits <- rnorm(n_total, mu_recruit, true_sigma)
+
+# package data
+fake_coho_unpooled <- list(
+  recruits = sim_recruits,
+  spawners = sim_spawners,
+  river = sim_rivers
+)
+
+# fit model
+coho_unpooled_fake <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha[river] + beta_spawn[river]*spawners,
+    alpha[river] ~ lognormal(1, 2),
+    beta_spawn[river] ~ normal(0, 1),
+    sigma ~ exponential(1)
+  ), data = fake_coho_unpooled, chains = 4, log_lik = TRUE
+)
+
+
+# check posterior estimates for true value
+precis(coho_unpooled_fake, depth=2)
+
+# plot 
+fake_coho_draws <- coho_unpooled_fake@cstanfit$draws(format="array")
+true_alpha_df <- data.frame(
+  Parameter = paste0("alpha[", 1:n_rivers, "]"),
+  xintercept = true_alpha
+)
+
+true_beta_df <- data.frame(
+  Parameter = paste0("beta_spawn[", 1:n_rivers, "]"),
+  xintercept = true_beta_spawn
+)
+
+true_sigma_df <- data.frame(
+  Parameter = "sigma",
+  xintercept = true_sigma
+)
+# alphas
+mcmc_dens_overlay(fake_coho_draws, regex_pars = "^alpha\\[") +
+  geom_vline(data = true_alpha_df,
+             aes(xintercept = xintercept),
+             color = "red", linetype = "dashed") +
+  ggtitle("alpha Posterior Densities") +
+  theme_minimal()
+
+# betas
+mcmc_dens_overlay(fake_coho_draws, regex_pars = "^beta_spawn\\[") +
+  geom_vline(data = true_beta_df,
+             aes(xintercept = xintercept),
+             color = "red", linetype = "dashed") +
+  ggtitle("beta_spawn Posterior Densities") +
+  theme_minimal()
+
+# sigma
+mcmc_dens_overlay(fake_coho_draws, pars = "sigma") +
+  geom_vline(data = true_sigma_df,
+             aes(xintercept = xintercept),
+             color = "red", linetype = "solid") +
+  ggtitle("Sigma Recovery") +
+  theme_minimal()
+```
+### Evaluate Model
+#### Posterior predictive check
+```{r}
+# observed vs predicted
+coho_unpooled_mu <- link(coho_unpooled, 
+                         data = list(spawners = coho_data$spawners,
+                                    river = coho_data$river))
+
+coho_unpooled_mean <- apply(coho_unpooled_mu, 2, mean)
+coho_unpooled_HPDI <- apply(coho_unpooled_mu, 2, HPDI, prob = 0.96)
+
+# Plot observed vs predicted
+plot(coho_unpooled_mean ~ coho_data$recruits, 
+     col = col.alpha("deepskyblue4", 0.4), 
+     pch = 16, 
+     lwd = 2, 
+     xlab = "Observed Recruits", 
+     ylab = "Predicted Recruits") 
+abline(a = 0, b = 1, lty = 2) 
+
+for (i in 1:length(coho_data$recruits)) {
+  lines(rep(coho_data$recruits[i], 2), 
+        coho_unpooled_HPDI[, i], 
+        col = "deepskyblue4")
+}
+```
+```{r}
+# posterior predictions
+# observed data
+y_obs <- as.numeric(coho_data$recruits)
+
+# get predictions from unpooled model
+y_pred_unpooled <- sim(coho_unpooled, 
+              data = list(spawners = coho_data$spawners,
+                         river = coho_data$river),
+              n = 1000)
+y_pred_pooled <- sim(coho_pooled, 
+              data = list(spawners = coho_data$spawners,
+                         river = coho_data$river),
+              n = 1000)
+
+y_pred_pooled <- as.matrix(y_pred_pooled)
+y_pred_unpooled <- as.matrix(y_pred_unpooled)
+
+mean_pred_pooled <- colMeans(y_pred_pooled)
+mean_pred_unpooled <- colMeans(y_pred_unpooled)
+
+
+```
+
+```{r}
+# plot the predicted regression
+par(mfrow = c(4, 4),
+    oma = c(0, 0, 2, 0),  
+    mar = c(4, 4, 2, 1))
+
+# Get unique river names (these correspond to indices 1, 2, 3, ... in the model)
+rivers <- unique(data$river)
+n_rivers <- length(rivers)
+
+for (r in 1:n_rivers) {
+  # Get river name
+  river_name <- rivers[r]
+  
+  # Subset data for this river
+  river_data <- data[data$river == river_name, ]
+  
+  # Unpooled predictions (use numeric index r)
+  coho_unpooled_mu <- link(coho_unpooled, 
+                           data = list(spawners = spawners_seq,
+                                      river = rep(r, length(spawners_seq))))
+  
+  coho_unpooled_mean <- apply(coho_unpooled_mu, 2, mean)
+  coho_unpooled_HPDI <- apply(coho_unpooled_mu, 2, HPDI, prob = 0.96)
+  
+  # Unstandardize
+  coho_unpooled_mean_ustd <- coho_unpooled_mean * scale_params$recruits_sd + scale_params$recruits_mean
+  coho_unpooled_HPDI_ustd <- coho_unpooled_HPDI * scale_params$recruits_sd + scale_params$recruits_mean
+  
+  # Plot with the subset
+  plot(R ~ S, 
+       data = river_data,  # Use the pre-subset data
+       xlab = river_name, 
+       ylab = "Recruits (km)", 
+       col = col.alpha("black", 0.6), 
+       pch = 16,
+       xlim = c(0, max(river_data$S)),
+       ylim = c(0, max(river_data$R)))
+  
+  lines(spawners_seq_ustd, coho_unpooled_mean_ustd, col = "steelblue", lwd = 2)
+  shade(coho_unpooled_HPDI_ustd, spawners_seq_ustd, col = col.alpha("steelblue", 0.3))
+  
+  lines(spawners_seq_ustd, coho_pooled_mean_ustd, col = "orange", lwd = 2)
+  shade(coho_pooled_HPDI_ustd, spawners_seq_ustd, col = col.alpha("orange", 0.2))
+}
+
+# Legend
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = 'l', bty = 'n', xaxt = 'n', yaxt = 'n')
+legend("top", 
+       legend = c("Unpooled Model", "Pooled Model", "97% HPDI"),
+       col = c("steelblue", "orange", "gray"),
+       lty = c(1, 1, NA),
+       lwd = c(2, 2, NA),
+       pch = c(NA, NA, 15),
+       xpd = TRUE, 
+       horiz = TRUE,
+       bty = "n")
+```
+
+## Modify Model: Partially Pooled Model
+
+### Model Notation
+
+$$
+\begin{align*}
+Recruits \sim Normal(mu, sigma) \\
+mu = alpha[river] + beta\_spawn[river]*Spawners \\
+alpha[river] \sim Normal(0, 1) \\
+beta\_spawn[river] \sim Normal(mu_S, sigma_S) \\
+mu_S \sim Normal(0,1) \\
+sigma,sigma_S \sim Exponential(1)
+\end{align*}
+$$
+### Data Visualisation
+```{r}
+```
+
+### Fit Model & Prior Predictive Simulations
+
+```{r}
+coho_partpooled <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha[river] + beta_spawn[river]*spawners,
+    alpha[river] ~ normal(0, 1),
+    beta_spawn[river] ~ normal(mu_s, sigma_s),
+    mu_s ~ normal(0, 1),
+    c(sigma, sigma_s) ~ exponential(1)
+  ), data = coho_data, chains = 4, log_lik = T
+)
+```
+
+```{r}
+# Extract priors
+coho_partial_prior <- extract.prior(coho_partpooled)  # Keep variable name as is
+
+# Spawners sequence
+spawners_seq <- seq(from = -2, to = 8, length.out = 185)
+
+# Set up multi-panel plot
+par(mfrow = c(3, 3))
+rivers <- unique(coho_data$river)
+
+for (r in rivers) {
+  # Get prior predictions for THIS specific river
+  prior_mu <- link(coho_partpooled,
+                   post = coho_partial_prior,
+                   data = list(spawners = spawners_seq,
+                              river = rep(r, length(spawners_seq))))
+  
+  # Summarize
+  prior_mean <- apply(prior_mu, 2, mean)
+  prior_hpdi <- apply(prior_mu, 2, HPDI, prob = 0.96)
+  
+  # Subset list elements for this river
+  river_idx <- which(coho_data$river == r)
+  
+  # Plot this river
+  plot(coho_data$recruits[river_idx] ~ coho_data$spawners[river_idx],
+       xlab = paste("River", r),
+       ylab = "Recruits (km, std)",
+       pch = 16,
+       col = col.alpha("black", 0.4),
+       xlim = c(0, max(coho_data$spawners[river_idx])),
+       ylim = c(0, max(coho_data$recruits[river_idx])))
+  
+  lines(spawners_seq, prior_mean, lwd = 2, col = "deepskyblue4")
+  shade(prior_hpdi, spawners_seq, col = col.alpha("deepskyblue4", 0.3))
+}
+```
+
+```{r}
+# Extract prior
+coho_partial_prior <- extract.prior(coho_partpooled)
+
+# Generate sequence of spawners for "data" and plotting
+spawners_seq <- seq(from = -2, to = 8, length.out = 185)
+
+# Get prior predictions for mu <- alpha[river] + beta_spawn[river]*spawners
+prior_mu <- link(coho_partpooled, 
+                 post = coho_partial_prior, 
+                 data = list(spawners = coho_data$spawners,
+                            river = coho_data$river))
+
+# Get the mean for each observation
+prior_mean_mu <- apply(prior_mu, 2, mean)
+
+# Calculate the HPDI @ 97%
+prior_mean_hdpi <- apply(prior_mu, 2, HPDI, .97)
+
+# Simulate predictions from prior
+y_prior <- sim(coho_partpooled, 
+               post = coho_partial_prior,
+               data = list(spawners = coho_data$spawners,
+                          river = coho_data$river),
+               n = 1000)
+y_prior <- as.matrix(y_prior)
+
+# Back transform
+y_prior_orig <- y_prior * scale_params$recruits_sd + scale_params$recruits_mean
+y_obs_orig <- as.numeric(coho_data$recruits) * scale_params$recruits_sd + scale_params$recruits_mean
+
+# Back transform parameters
+alpha_orig <- c(coho_partial_prior$alpha) * scale_params$recruits_sd + scale_params$recruits_mean
+beta_orig <- c(coho_partial_prior$beta_spawn) * (scale_params$recruits_sd / scale_params$spawners_sd)
+mu_s_orig <- coho_partial_prior$mu_s * (scale_params$recruits_sd / scale_params$spawners_sd)
+sigma_s_orig <- coho_partial_prior$sigma_s * (scale_params$recruits_sd / scale_params$spawners_sd)
+
+par(mfrow = c(1, 2))
+hist(coho_partial_prior$mu_s, 
+     main = "Population Mean Slope (std)", 
+     xlab = "mu_s", 
+     breaks = 30)
+hist(coho_partial_prior$sigma_s, 
+     main = "Slope Variation (std)", 
+     xlab = "sigma_s", 
+     breaks = 30)
+
+par(mfrow = c(1, 2))
+hist(alpha_orig, 
+     main = "Intercepts (unstd)", 
+     xlab = "Recruits when Spawners = 0", 
+     breaks = 30)
+hist(beta_orig, 
+     main = "Slopes (unstd)", 
+     xlab = "Change in Recruits per Spawner", 
+     breaks = 30)
+
+ppc_dens_overlay(y_obs_orig, y_prior_orig[1:50,]) +
+  ggtitle("Prior Predictive: Unpooled Model") +
+  xlab("Recruits (km)") +
+  theme_minimal()
+```
+
+
+### Validate Computation
+And now we want to check how well our model was at fitting the model.
+We check for:
+#### Convergence Diagnostics
+```{r}
+precis(coho_partpooled, depth=2)
+
+# posterior and trace plots using bayesplot package
+posterior_draws <- coho_partpooled@cstanfit$draws(format="array")
+mcmc_combo(posterior_draws, combo = c("dens_overlay", "trace"), regex_pars = c("^alpha\\[[1-5]\\]$"))
+mcmc_combo(posterior_draws, combo = c("dens_overlay", "trace"), regex_pars = c("^beta_spawn\\[[1-5]\\]$"))
+mcmc_combo(posterior_draws, combo = c("dens_overlay", "trace"), pars = c("mu_s", "sigma_s"))
+mcmc_combo(posterior_draws, combo = c("dens_overlay", "trace"), pars = c("sigma"))
+```
+#### Fake-Data Validation
+```{r}
+# Set "true" values for partially pooled structure
+n_rivers <- 14
+
+# hyper-parameters for hierarchical structure
+true_mu_s <- 0.5  # Population mean slope
+true_sigma_s <- 0.2  # Variation in slopes
+
+# generate river parameters
+true_alpha <- rnorm(n_rivers, 0.2, 0.3)  # intercepts - fixed
+true_beta_spawn <- rnorm(n_rivers, true_mu_s, true_sigma_s)  # random slopes
+true_sigma <- 0.8  
+
+# generate data
+n_spawn <- 185
+n_total <- n_rivers * n_spawn
+
+sim_spawners <- rnorm(n_total, 0, 1)
+sim_rivers <- rep(1:n_rivers, each = n_spawn)
+
+# get recruits
+mu_recruit <- true_alpha[sim_rivers] + true_beta_spawn[sim_rivers] * sim_spawners
+sim_recruits <- rnorm(n_total, mu_recruit, true_sigma)
+
+# package data
+fake_coho_partial <- list(
+  recruits = sim_recruits,
+  spawners = sim_spawners,
+  river = sim_rivers
+)
+coho_partial_fake <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha[river] + beta_spawn[river]*spawners,
+    alpha[river] ~ normal(0, 1),
+    beta_spawn[river] ~ normal(mu_s, sigma_s),  # Hierarchical!
+    mu_s ~ normal(0, 1),
+    c(sigma, sigma_s) ~ exponential(1)
+  ), data = fake_coho_partial, chains = 4, log_lik = TRUE
+)
+precis(coho_partial_fake, depth = 2)
+fake_coho_draws <- coho_partial_fake@cstanfit$draws(format = "array")
+
+# Create true value data frames
+true_alpha_df <- data.frame(
+  Parameter = paste0("alpha[", 1:n_rivers, "]"),
+  xintercept = true_alpha
+)
+true_beta_df <- data.frame(
+  Parameter = paste0("beta_spawn[", 1:n_rivers, "]"),
+  xintercept = true_beta_spawn
+)
+
+true_hyper_df <- data.frame(
+  Parameter = c("mu_s", "sigma_s", "sigma"),
+  xintercept = c(true_mu_s, true_sigma_s, true_sigma)
+)
+mcmc_dens_overlay(fake_coho_draws, regex_pars = "^alpha\\[") +
+  geom_vline(data = true_alpha_df,
+             aes(xintercept = xintercept),
+             color = "red", linetype = "dashed") +
+  ggtitle("Alpha Posterior Densities") +
+  theme_minimal()
+mcmc_dens_overlay(fake_coho_draws, regex_pars = "^beta_spawn\\[") +
+  geom_vline(data = true_beta_df,
+             aes(xintercept = xintercept),
+             color = "red", linetype = "dashed") +
+  ggtitle("Beta_spawn Posterior Densities (Partially Pooled)") +
+  theme_minimal()
+mcmc_dens_overlay(fake_coho_draws, pars = c("mu_s", "sigma_s", "sigma")) +
+  geom_vline(data = true_hyper_df,
+             aes(xintercept = xintercept),
+             color = "red", linetype = "dashed") +
+  ggtitle("Hyperparameter Recovery") +
+  theme_minimal()
+mcmc_intervals(fake_coho_draws, 
+               regex_pars = "^beta_spawn\\[",
+               prob = 0.8, 
+               prob_outer = 0.95) +
+  geom_vline(data = true_beta_df,
+             aes(xintercept = xintercept),
+             color = "red", linetype = "dashed") +
+  geom_vline(xintercept = true_mu_s, 
+             color = "blue", linetype = "solid", linewidth = 1) +
+  ggtitle("Beta Shrinkage: Red = True Values, Blue = Population Mean") +
+  theme_minimal()
+```
+### Evaluate Model
+#### Posterior predictive check
+```{r}
+# observed vs predicted
+coho_partial_mu <- link(coho_partpooled, 
+                        data = list(spawners = coho_data$spawners,
+                                   river = coho_data$river))
+
+coho_partial_mean <- apply(coho_partial_mu, 2, mean)
+coho_partial_HPDI <- apply(coho_partial_mu, 2, HPDI, prob = 0.96)
+
+# Plot observed vs predicted
+plot(coho_partial_mean ~ coho_data$recruits, 
+     col = col.alpha("deepskyblue4", 0.4), 
+     pch = 16, 
+     lwd = 2, 
+     xlab = "Observed Recruits", 
+     ylab = "Predicted Recruits",
+     main = "Partially Pooled Model") 
+abline(a = 0, b = 1, lty = 2) 
+
+for (i in 1:length(coho_data$recruits)) {
+  lines(rep(coho_data$recruits[i], 2), 
+        coho_partial_HPDI[, i], 
+        col = "deepskyblue4")
+}
+```
+```{r}
+# posterior predictions
+# observed data
+y_obs <- as.numeric(coho_data$recruits)
+
+# get predictions
+y_pred_unpooled <- sim(coho_unpooled, 
+              data = list(spawners = coho_data$spawners,
+                         river = coho_data$river),
+              n = 1000)
+y_pred_pooled <- sim(coho_pooled, 
+              data = list(spawners = coho_data$spawners,
+                         river = coho_data$river),
+              n = 1000)
+y_pred_partpooled <- sim(coho_partpooled, 
+              data = list(spawners = coho_data$spawners,
+                         river = coho_data$river),
+              n = 1000)
+y_pred_pooled <- as.matrix(y_pred_pooled)
+y_pred_unpooled <- as.matrix(y_pred_unpooled)
+y_pred_partpooled <- as.matrix(y_pred_partpooled)
+
+mean_pred_pooled <- colMeans(y_pred_pooled)
+mean_pred_unpooled <- colMeans(y_pred_unpooled)
+mean_pred_partpooled <- colMeans(y_pred_partpooled)
+
+# Density overlay
+ppc_dens_overlay(y_obs, y_pred_partpooled[1:500,]) +
+  geom_density(data = data.frame(x = mean_pred_partpooled),
+               aes(x = x), 
+               color = "red", linewidth = 1, linetype = "solid") + 
+  geom_density(data = data.frame(x = mean_pred_pooled),
+               aes(x = x), 
+               color = "orange", linewidth = 1, linetype = "solid") +
+  geom_density(data = data.frame(x = mean_pred_unpooled),
+               aes(x = x), 
+               color = "steelblue", linewidth = 1, linetype = "solid") +
+  ggtitle("Partially Pooled Model: Posterior Predictive Check") +
+  theme_minimal()
+```
+
+```{r}
+# Plot the predicted regression - ALL THREE MODELS
+par(mfrow = c(4, 4),
+    oma = c(0, 0, 2, 0),  
+    mar = c(4, 4, 2, 1))
+
+# Get unique river names
+rivers <- unique(data$river)
+n_rivers <- length(rivers)
+
+for (r in 1:n_rivers) {
+  # Get river name
+  river_name <- rivers[r]
+  
+  # Subset data for this river
+  river_data <- data[data$river == river_name, ]
+  
+  # PARTIALLY POOLED predictions (use numeric index r)
+  coho_partial_mu <- link(coho_partpooled, 
+                          data = list(spawners = spawners_seq,
+                                     river = rep(r, length(spawners_seq))))
+  
+  coho_partial_mean <- apply(coho_partial_mu, 2, mean)
+  coho_partial_HPDI <- apply(coho_partial_mu, 2, HPDI, prob = 0.40)
+  
+  # Unstandardize partially pooled
+  coho_partial_mean_ustd <- coho_partial_mean * scale_params$recruits_sd + scale_params$recruits_mean
+  coho_partial_HPDI_ustd <- coho_partial_HPDI * scale_params$recruits_sd + scale_params$recruits_mean
+  
+  # UNPOOLED predictions (use numeric index r)
+  coho_unpooled_mu <- link(coho_unpooled, 
+                           data = list(spawners = spawners_seq,
+                                      river = rep(r, length(spawners_seq))))
+  
+  coho_unpooled_mean <- apply(coho_unpooled_mu, 2, mean)
+  coho_unpooled_HPDI <- apply(coho_unpooled_mu, 2, HPDI, prob = 0.97)
+  
+  # Unstandardize unpooled
+  coho_unpooled_mean_ustd <- coho_unpooled_mean * scale_params$recruits_sd + scale_params$recruits_mean
+  coho_unpooled_HPDI_ustd <- coho_unpooled_HPDI * scale_params$recruits_sd + scale_params$recruits_mean
+  
+  # Plot data points
+  plot(R ~ S, 
+       data = river_data,
+       xlab = river_name, 
+       ylab = "Recruits (km)", 
+       col = col.alpha("black", 0.6), 
+       pch = 16,
+       xlim = c(0, max(river_data$S)),
+       ylim = c(0, max(river_data$R)))
+  
+  # Add pooled model (orange) - same for all rivers
+  lines(spawners_seq_ustd, coho_pooled_mean_ustd, col = "orange", lwd = 2)
+  #shade(coho_pooled_HPDI_ustd, spawners_seq_ustd, col = col.alpha("orange", 0.2))
+  
+  # Add unpooled model (steelblue)
+  lines(spawners_seq_ustd, coho_unpooled_mean_ustd, col = "steelblue", lwd = 2)
+  #shade(coho_unpooled_HPDI_ustd, spawners_seq_ustd, col = col.alpha("steelblue", 0.3))
+  
+  # Add partially pooled model (purple)
+  lines(spawners_seq_ustd, coho_partial_mean_ustd, col = "purple", lwd = 2)
+  shade(coho_partial_HPDI_ustd, spawners_seq_ustd, col = col.alpha("purple", 0.3))
+}
+
+# Legend
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = 'l', bty = 'n', xaxt = 'n', yaxt = 'n')
+legend("top", 
+       legend = c("Pooled", "Unpooled", "Partially Pooled", "97% HPDI"),
+       col = c("orange", "steelblue", "purple", "gray"),
+       lty = c(1, 1, 1, NA),
+       lwd = c(2, 2, 2, NA),
+       pch = c(NA, NA, NA, 15),
+       xpd = TRUE, 
+       horiz = TRUE,
+       bty = "n")
+```
+## Compare Models
+```{r}
+compare(coho_partpooled, coho_pooled, coho_unpooled)
+```
+
+
+
+```{r}
+# import data and view data
+data <- read.csv2('bman_coho.csv', sep = ',')
+# R and S are considered characters in this data,
+# set them to be numeric
+data$S <- as.numeric(data$S)
+data$R <- as.numeric(data$R)
+
+# give each river an id
+data$river_id = as.integer(as.factor(data$river))
+
+
+# package just the data we need and transform data
+# going to create z-score standardized and,
+coho_data_std <- list(
+  recruits = standardize(data$R),
+  spawners = standardize(data$S),
+  river = data$river_id
+)
+# and original per km std
+coho_data <- list(
+  recruits = data$R,
+  spawners = data$S,
+  river = data$river_id
+)
+# and mean centered
+coho_data_mc <- list(
+  recruits = data$R,
+  spawners = data$S - mean(data$S),
+  river = data$river_id
+)
+
+# keep scale parameters saved for back transform from z-scale
+scale_params <- list(
+  recruits_mean = mean(as.numeric(data$R)),
+  recruits_sd = sd(as.numeric(data$R)),
+  spawners_mean = mean(as.numeric(data$S)),
+  spawners_sd = sd(as.numeric(data$S))
+)
+
+coho_pooled <- ulam(
+  alist(
+    recruits ~ normal(mu, sigma),
+    mu <- alpha + beta_spawn*spawners,
+    alpha ~ lognormal(-0.03, 0.01),
+    beta_spawn ~ normal(1, 0.1),
+    sigma ~ exponential(1)
+  ), data = coho_data, chains = 4, log_lik = T
+)
+
+# extract prior
+coho_pooled_prior <- extract.prior(coho_pooled)
+
+# generate sequence of spawners for "data" and plotting
+spawners_seq <- seq(from=-2, to=8, length.out=185)
+
+# get prior predictions for mu <- alpha + beta_spawn*spawners
+prior_mu <- link(coho_pooled, post=coho_pooled_prior, data=list(spawners=spawners_seq))
+# get the mean for each observation
+prior_mean_mu <- apply(prior_mu, 2, mean)
+# calculate the HPDI @ 97 %
+prior_mean_hdpi <- apply(prior_mu, 2, HPDI, .97)
+
+# simulate predictions from prior
+y_prior <- sim(coho_pooled, post = coho_pooled_prior,
+               data = list(spawners = coho_data$spawners),
+               n = 1000)
+
+y_prior <- as.matrix(y_prior)
+
+# back transform
+y_prior_orig <- y_prior * scale_params$recruits_sd + scale_params$recruits_mean
+y_obs_orig <- as.numeric(coho_data$recruits) * scale_params$recruits_sd + scale_params$recruits_mean
+
+alpha_orig <- coho_pooled_prior$alpha * scale_params$recruits_sd + scale_params$recruits_mean
+beta_orig <- coho_pooled_prior$beta_spawn * (scale_params$recruits_sd / scale_params$spawners_sd)
+
+# plot priors on original scale
+par(mfrow = c(1, 2))
+hist(coho_pooled_prior$alpha, main = "Intercept (std)", 
+     xlab = "Recruits when Spawners = 0", breaks = 30)
+hist(coho_pooled_prior$beta_spawn, main = "Slope (std)", 
+     xlab = "Change in Recruits per Spawner", breaks = 30)
+par(mfrow = c(1, 2))
+hist(alpha_orig, main = "Intercept (unstd)", 
+     xlab = "Recruits when Spawners = 0", breaks = 30)
+hist(beta_orig, main = "Slope (unstd)", 
+     xlab = "Change in Recruits per Spawner", breaks = 30)
+ppc_dens_overlay(y_obs_orig, y_prior[1:50,]) +
+  xlab("Recruits (km)") +
+  theme_minimal()
+```
